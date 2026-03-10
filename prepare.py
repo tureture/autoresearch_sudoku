@@ -6,7 +6,7 @@ Usage:
     python prepare.py                  # generate puzzles
     python prepare.py --num-puzzles 50 # generate 50 puzzles
 
-Puzzles are stored in ~/.cache/autoresearch_sudoku/.
+Puzzles are stored in data/ inside the repo.
 """
 
 import os
@@ -21,17 +21,17 @@ import argparse
 # ---------------------------------------------------------------------------
 
 TIME_BUDGET = 300        # solver time budget in seconds (5 minutes)
-GRID_SIZE = 9           # 9x9 Sudoku
-BOX_H = 3               # box height
-BOX_W = 3               # box width
-NUM_PUZZLES = 100        # number of evaluation puzzles
+GRID_SIZE = 16           # 16x16 Sudoku
+BOX_H = 4               # box height
+BOX_W = 4               # box width
+NUM_PUZZLES = 10        # number of evaluation puzzles
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "autoresearch_sudoku")
-PUZZLES_FILE = os.path.join(CACHE_DIR, "puzzles.json")
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+PUZZLES_FILE = os.path.join(DATA_DIR, "puzzles.json")
 SEED = 42
 
 # ---------------------------------------------------------------------------
@@ -96,15 +96,31 @@ def _create_puzzle(full_grid, num_clues, rng_seed):
     return puzzle
 
 
+def _current_config():
+    """Return the config dict that gets embedded in puzzles.json."""
+    return {
+        "grid_size": GRID_SIZE,
+        "box_h": BOX_H,
+        "box_w": BOX_W,
+        "num_puzzles": NUM_PUZZLES,
+        "seed": SEED,
+    }
+
+
 def generate_puzzles(num_puzzles=NUM_PUZZLES, seed=SEED):
-    """Generate a set of 16x16 Sudoku puzzles with varying difficulty."""
-    os.makedirs(CACHE_DIR, exist_ok=True)
+    """Generate a set of Sudoku puzzles with varying difficulty."""
+    os.makedirs(DATA_DIR, exist_ok=True)
 
     if os.path.exists(PUZZLES_FILE):
-        print(f"Puzzles: already generated at {PUZZLES_FILE}")
-        return load_puzzles()
+        with open(PUZZLES_FILE, "r") as f:
+            data = json.load(f)
+        saved_config = data.get("config", {})
+        if saved_config == _current_config():
+            print(f"Puzzles: already generated at {PUZZLES_FILE}")
+            return data["puzzles"]
+        print("Config changed, regenerating puzzles...")
 
-    print(f"Generating {num_puzzles} 16x16 Sudoku puzzles...")
+    print(f"Generating {num_puzzles} {GRID_SIZE}x{GRID_SIZE} Sudoku puzzles...")
     puzzles = []
 
     for i in range(num_puzzles):
@@ -126,8 +142,9 @@ def generate_puzzles(num_puzzles=NUM_PUZZLES, seed=SEED):
         if (i + 1) % 10 == 0:
             print(f"  Generated {i + 1}/{num_puzzles} puzzles")
 
+    data = {"config": _current_config(), "puzzles": puzzles}
     with open(PUZZLES_FILE, "w") as f:
-        json.dump(puzzles, f)
+        json.dump(data, f)
 
     print(f"Puzzles: saved {num_puzzles} puzzles to {PUZZLES_FILE}")
     return puzzles
@@ -136,7 +153,12 @@ def generate_puzzles(num_puzzles=NUM_PUZZLES, seed=SEED):
 def load_puzzles():
     """Load puzzles from disk."""
     with open(PUZZLES_FILE, "r") as f:
-        return json.load(f)
+        data = json.load(f)
+    saved_config = data.get("config", {})
+    if saved_config != _current_config():
+        print("Config changed since last generation, regenerating...")
+        return generate_puzzles()
+    return data["puzzles"]
 
 # ---------------------------------------------------------------------------
 # Evaluation (DO NOT CHANGE — this is the fixed metric)
@@ -276,7 +298,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-puzzles", type=int, default=NUM_PUZZLES, help="Number of puzzles to generate")
     args = parser.parse_args()
 
-    print(f"Cache directory: {CACHE_DIR}")
+    print(f"Data directory: {DATA_DIR}")
     print()
 
     puzzles = generate_puzzles(num_puzzles=args.num_puzzles)
