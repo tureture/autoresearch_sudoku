@@ -8,7 +8,7 @@ Usage: uv run train.py
 import time
 import copy
 
-from prepare import TIME_BUDGET, GRID_SIZE, BOX_H, BOX_W, load_puzzles, evaluate_solver
+from prepare import TIME_BUDGET, GRID_SIZE, BOX_H, BOX_W, load_puzzles, evaluate_solver, check_deadline
 
 # ---------------------------------------------------------------------------
 # Brute-force backtracking solver (edit this to optimize)
@@ -41,6 +41,7 @@ def solve(grid):
         for r in range(size):
             for c in range(size):
                 if grid[r][c] == 0:
+                    check_deadline()
                     for num in range(1, size + 1):
                         if is_valid(r, c, num):
                             grid[r][c] = num
@@ -81,10 +82,12 @@ if __name__ == "__main__":
     t_end = time.time()
     print()
     print("---")
+    print(f"score:             {results['score']:.6f}")
     print(f"puzzles_solved:    {results['puzzles_solved']}")
     print(f"puzzles_attempted: {results['puzzles_attempted']}")
     print(f"total_puzzles:     {results['total_puzzles']}")
     print(f"solve_rate:        {results['solve_rate']:.4f}")
     print(f"total_time:        {results['total_time']:.1f}")
+    print(f"solve_time_sum:    {results['solve_time_sum']:.3f}")
     print(f"avg_time_per_solve: {results['avg_time_per_solved']:.3f}")
     print(f"wall_clock:        {t_end - t_start:.1f}")

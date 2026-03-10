@@ -20,7 +20,7 @@ import argparse
 # Constants (fixed, do not modify)
 # ---------------------------------------------------------------------------
 
-TIME_BUDGET = 300        # solver time budget in seconds (5 minutes)
+TIME_BUDGET = 300       # solver time budget in seconds (5 minutes)
 GRID_SIZE = 16           # 16x16 Sudoku
 BOX_H = 4               # box height
 BOX_W = 4               # box width
@@ -214,9 +214,31 @@ def validate_solution(puzzle, solution, expected_solution):
     return True, "OK"
 
 
+# ---------------------------------------------------------------------------
+# Cooperative timeout mechanism
+# ---------------------------------------------------------------------------
+
+class SolverTimeout(Exception):
+    """Raised by check_deadline() when the time budget is exhausted."""
+    pass
+
+_deadline = float("inf")  # absolute time.time() deadline
+
+def check_deadline():
+    """
+    Call this periodically inside your solver. Raises SolverTimeout if
+    the time budget has been exceeded. Cheap to call (just a clock read).
+    """
+    if time.time() >= _deadline:
+        raise SolverTimeout("time budget exceeded")
+
+
 def evaluate_solver(solve_fn, puzzles, time_budget=TIME_BUDGET):
     """
     Evaluate a solver function on the puzzle set within the time budget.
+    Puzzles are solved sequentially. Before each puzzle, a global deadline
+    is set so the solver can call check_deadline() to cooperatively abort
+    when time runs out.
 
     Args:
         solve_fn: function(puzzle) -> solution_grid or None
@@ -231,14 +253,15 @@ def evaluate_solver(solve_fn, puzzles, time_budget=TIME_BUDGET):
         - solve_rate: fraction of attempted puzzles solved correctly
         - results: list of per-puzzle results
     """
+    global _deadline
     results = []
     puzzles_solved = 0
     puzzles_attempted = 0
     t_start = time.time()
+    _deadline = t_start + time_budget
 
     for p in puzzles:
-        elapsed = time.time() - t_start
-        if elapsed >= time_budget:
+        if time.time() >= _deadline:
             break
 
         puzzle = p["puzzle"]
@@ -248,8 +271,16 @@ def evaluate_solver(solve_fn, puzzles, time_budget=TIME_BUDGET):
         t_puzzle_start = time.time()
         try:
             solution = solve_fn(copy.deepcopy(puzzle))
+        except SolverTimeout:
+            results.append({
+                "id": puzzle_id,
+                "solved": False,
+                "time": time.time() - t_puzzle_start,
+                "error": "timeout",
+            })
+            puzzles_attempted += 1
+            break  # no time left, stop entirely
         except Exception as e:
-            solution = None
             results.append({
                 "id": puzzle_id,
                 "solved": False,
@@ -259,9 +290,7 @@ def evaluate_solver(solve_fn, puzzles, time_budget=TIME_BUDGET):
             puzzles_attempted += 1
             continue
 
-        t_puzzle_end = time.time()
-        puzzle_time = t_puzzle_end - t_puzzle_start
-
+        puzzle_time = time.time() - t_puzzle_start
         is_correct, msg = validate_solution(puzzle, solution, expected)
 
         results.append({
@@ -275,18 +304,50 @@ def evaluate_solver(solve_fn, puzzles, time_budget=TIME_BUDGET):
         if is_correct:
             puzzles_solved += 1
 
+    _deadline = float("inf")  # reset after evaluation
     total_time = time.time() - t_start
     avg_time = total_time / puzzles_solved if puzzles_solved > 0 else float("inf")
+    # Sum of solve times for correctly solved puzzles only
+    solve_time_sum = sum(r["time"] for r in results if r["solved"])
 
-    return {
+    result = {
         "puzzles_solved": puzzles_solved,
         "puzzles_attempted": puzzles_attempted,
         "total_puzzles": len(puzzles),
         "total_time": total_time,
+        "solve_time_sum": solve_time_sum,
         "avg_time_per_solved": avg_time,
         "solve_rate": puzzles_solved / puzzles_attempted if puzzles_attempted > 0 else 0.0,
         "results": results,
     }
+    result["score"] = compute_score(result, time_budget)
+    return result
+
+
+def compute_score(result, time_budget=TIME_BUDGET):
+    """
+    Unified score for optimization. Higher is better.
+
+    score = puzzles_solved + speed_bonus
+
+    The speed bonus is in [0, 1) and only matters as a tiebreaker:
+        speed_bonus = 1 - (solve_time_sum / time_budget)
+    where solve_time_sum is the total time spent on correctly solved
+    puzzles only. Unsolved or incorrect puzzles do not contribute.
+
+    This means:
+    - Each correctly solved puzzle contributes exactly 1 point.
+    - When two solvers solve the same number of puzzles, the faster
+      one scores higher.
+    - A solver that solves N+1 puzzles always beats one that solves N,
+      regardless of speed.
+    """
+    solved = result["puzzles_solved"]
+    if solved == 0:
+        return 0.0
+    solve_time = result["solve_time_sum"]
+    speed_bonus = max(0.0, 1.0 - solve_time / time_budget)
+    return solved + speed_bonus
 
 
 # ---------------------------------------------------------------------------
