@@ -69,6 +69,11 @@ for _ui, _unit in enumerate(_ALL_UNITS):
 def solve(grid):
     N = _N
     total = N * N
+    PEERS = _PEERS_FLAT
+    UNITS = _ALL_UNITS
+    POPCOUNT = _POPCOUNT
+    LSB_VAL = _LSB_VAL
+    ALL_BITS = _ALL_BITS
 
     # Flat arrays for grid values and candidate bitmasks
     vals = [0] * total
@@ -82,13 +87,13 @@ def solve(grid):
                 cands[idx] = 0
             else:
                 vals[idx] = 0
-                cands[idx] = _ALL_BITS
+                cands[idx] = ALL_BITS
 
     # Initial elimination from clues
     for idx in range(total):
         if vals[idx] != 0:
             bit = 1 << (vals[idx] - 1)
-            for p in _PEERS_FLAT[idx]:
+            for p in PEERS[idx]:
                 cands[p] &= ~bit
     
     # Check for contradictions
@@ -101,8 +106,7 @@ def solve(grid):
         bit = 1 << (val - 1)
         vals[idx] = val
         cands[idx] = 0
-        # Eliminate from all peers
-        for p in _PEERS_FLAT[idx]:
+        for p in PEERS[idx]:
             if cands[p] & bit:
                 cands[p] &= ~bit
                 if vals[p] == 0 and cands[p] == 0:
@@ -117,15 +121,14 @@ def solve(grid):
             # Naked singles
             for idx in range(total):
                 c = cands[idx]
-                if c != 0 and _POPCOUNT[c] == 1:
-                    val = _LSB_VAL[c]
+                if c != 0 and POPCOUNT[c] == 1:
+                    val = LSB_VAL[c]
                     if not assign(idx, val, vals, cands):
                         return False
                     changed = True
 
-            # Hidden singles: for each unit, find values with only one possible cell
-            for unit in _ALL_UNITS:
-                # For each value bit, track which cells can hold it
+            # Hidden singles
+            for unit in UNITS:
                 for v in range(N):
                     bit = 1 << v
                     place = -1
@@ -137,7 +140,6 @@ def solve(grid):
                             if count > 1:
                                 break
                     if count == 0:
-                        # Check if already placed
                         found = False
                         for idx in unit:
                             if vals[idx] == v + 1:
@@ -150,6 +152,25 @@ def solve(grid):
                             if not assign(place, v + 1, vals, cands):
                                 return False
                             changed = True
+
+            # Naked pairs: if two cells in a unit have exact same 2 candidates,
+            # eliminate those candidates from all other cells in the unit
+            for unit in UNITS:
+                for i in range(len(unit)):
+                    ci = cands[unit[i]]
+                    if POPCOUNT[ci] != 2:
+                        continue
+                    for j in range(i + 1, len(unit)):
+                        if cands[unit[j]] == ci:
+                            # Found naked pair — eliminate from rest of unit
+                            for k in range(len(unit)):
+                                if k != i and k != j and cands[unit[k]] & ci:
+                                    cands[unit[k]] &= ~ci
+                                    if vals[unit[k]] == 0 and cands[unit[k]] == 0:
+                                        return False
+                                    if POPCOUNT[cands[unit[k]]] == 1:
+                                        changed = True
+                            break
         return True
 
     def backtrack(vals, cands):
@@ -164,7 +185,7 @@ def solve(grid):
         for idx in range(total):
             c = cands[idx]
             if c != 0:
-                pc = _POPCOUNT[c]
+                pc = POPCOUNT[c]
                 if pc < best_count:
                     best_count = pc
                     best = idx
@@ -177,9 +198,9 @@ def solve(grid):
         # Try each candidate value
         c = cands[best]
         while c:
-            bit = c & (-c)  # lowest set bit
-            val = bit.bit_length()  # 1-indexed value
-            c &= c - 1  # remove lowest bit
+            bit = c & (-c)
+            val = bit.bit_length()
+            c &= c - 1
 
             # Save state
             old_vals = vals[:]
@@ -195,7 +216,6 @@ def solve(grid):
         return False
 
     if backtrack(vals, cands):
-        # Write back to grid
         for r in range(N):
             for c in range(N):
                 grid[r][c] = vals[r * N + c]
