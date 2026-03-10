@@ -1,6 +1,6 @@
 """
 Autoresearch Sudoku solver.
-Constraint propagation + backtracking with MRV heuristic.
+Bitmask constraint propagation + backtracking with MRV heuristic.
 
 Usage: uv run train.py
 """
@@ -11,171 +11,194 @@ import copy
 from prepare import TIME_BUDGET, GRID_SIZE, BOX_H, BOX_W, load_puzzles, evaluate_solver, check_deadline
 
 # ---------------------------------------------------------------------------
-# Precompute peer groups for each cell
+# Precompute peer indices and unit indices using flat arrays
 # ---------------------------------------------------------------------------
 
-_ALL_VALUES = frozenset(range(1, GRID_SIZE + 1))
+_N = GRID_SIZE
+_ALL_BITS = (1 << _N) - 1  # 0xFFFF for 16 values: bits 0-15 represent values 1-16
 
-# For each cell (r, c), list of peer cells (same row, col, or box, excluding self)
-_PEERS = [[None] * GRID_SIZE for _ in range(GRID_SIZE)]
-for _r in range(GRID_SIZE):
-    for _c in range(GRID_SIZE):
+# Popcount table for 16-bit values
+_POPCOUNT = [0] * (1 << _N)
+for _i in range(1, 1 << _N):
+    _POPCOUNT[_i] = _POPCOUNT[_i >> 1] + (_i & 1)
+
+# Lowest set bit value (1-indexed): _LSB_VAL[mask] gives the value (1-16) of the lowest set bit
+_LSB_VAL = [0] * (1 << _N)
+for _i in range(1, 1 << _N):
+    _LSB_VAL[_i] = (_i & -_i).bit_length()
+
+# Flat index: cell (r, c) -> r * N + c
+# Peers for each flat cell index
+_PEERS_FLAT = [None] * (_N * _N)
+for _r in range(_N):
+    for _c in range(_N):
         peers = set()
-        for i in range(GRID_SIZE):
+        for i in range(_N):
             if i != _c:
-                peers.add((_r, i))
+                peers.add(_r * _N + i)
             if i != _r:
-                peers.add((i, _c))
+                peers.add(i * _N + _c)
         br, bc = (_r // BOX_H) * BOX_H, (_c // BOX_W) * BOX_W
         for i in range(br, br + BOX_H):
             for j in range(bc, bc + BOX_W):
                 if (i, j) != (_r, _c):
-                    peers.add((i, j))
-        _PEERS[_r][_c] = tuple(peers)
+                    peers.add(i * _N + j)
+        _PEERS_FLAT[_r * _N + _c] = tuple(peers)
 
-# For each cell, list of (unit_type, unit_cells) where unit_cells excludes self
-_UNITS = [[None] * GRID_SIZE for _ in range(GRID_SIZE)]
-for _r in range(GRID_SIZE):
-    for _c in range(GRID_SIZE):
-        units = []
-        # Row unit
-        units.append(tuple((_r, i) for i in range(GRID_SIZE) if i != _c))
-        # Col unit
-        units.append(tuple((i, _c) for i in range(GRID_SIZE) if i != _r))
-        # Box unit
-        br, bc = (_r // BOX_H) * BOX_H, (_c // BOX_W) * BOX_W
-        units.append(tuple((i, j) for i in range(br, br + BOX_H)
-                           for j in range(bc, bc + BOX_W) if (i, j) != (_r, _c)))
-        _UNITS[_r][_c] = units
+# Units: all rows, columns, and boxes as tuples of flat indices
+_ALL_UNITS = []
+for _r in range(_N):
+    _ALL_UNITS.append(tuple(_r * _N + _c for _c in range(_N)))
+for _c in range(_N):
+    _ALL_UNITS.append(tuple(_r * _N + _c for _r in range(_N)))
+for _br in range(0, _N, BOX_H):
+    for _bc in range(0, _N, BOX_W):
+        _ALL_UNITS.append(tuple((_br + i) * _N + (_bc + j)
+                                for i in range(BOX_H) for j in range(BOX_W)))
+
+# For each cell, the 3 units it belongs to
+_CELL_UNITS = [[] for _ in range(_N * _N)]
+for _ui, _unit in enumerate(_ALL_UNITS):
+    for _idx in _unit:
+        _CELL_UNITS[_idx].append(_ui)
 
 # ---------------------------------------------------------------------------
-# Solver: constraint propagation + backtracking with MRV
+# Solver
 # ---------------------------------------------------------------------------
 
 def solve(grid):
-    # Initialize candidates: sets of possible values for each cell
-    candidates = [[None] * GRID_SIZE for _ in range(GRID_SIZE)]
-    for r in range(GRID_SIZE):
-        for c in range(GRID_SIZE):
-            if grid[r][c] != 0:
-                candidates[r][c] = None  # already filled
+    N = _N
+    total = N * N
+
+    # Flat arrays for grid values and candidate bitmasks
+    vals = [0] * total
+    cands = [0] * total
+    for r in range(N):
+        for c in range(N):
+            idx = r * N + c
+            v = grid[r][c]
+            if v != 0:
+                vals[idx] = v
+                cands[idx] = 0
             else:
-                candidates[r][c] = set(_ALL_VALUES)
+                vals[idx] = 0
+                cands[idx] = _ALL_BITS
 
-    # Eliminate values based on initial clues
-    for r in range(GRID_SIZE):
-        for c in range(GRID_SIZE):
-            if grid[r][c] != 0:
-                val = grid[r][c]
-                for pr, pc in _PEERS[r][c]:
-                    if candidates[pr][pc] is not None:
-                        candidates[pr][pc].discard(val)
+    # Initial elimination from clues
+    for idx in range(total):
+        if vals[idx] != 0:
+            bit = 1 << (vals[idx] - 1)
+            for p in _PEERS_FLAT[idx]:
+                cands[p] &= ~bit
+    
+    # Check for contradictions
+    for idx in range(total):
+        if vals[idx] == 0 and cands[idx] == 0:
+            return None
 
-    # Check for any empty candidates (unsolvable)
-    for r in range(GRID_SIZE):
-        for c in range(GRID_SIZE):
-            if candidates[r][c] is not None and len(candidates[r][c]) == 0:
-                return None
+    def assign(idx, val, vals, cands):
+        """Assign val to cell idx, propagate. Returns False on contradiction."""
+        bit = 1 << (val - 1)
+        vals[idx] = val
+        cands[idx] = 0
+        # Eliminate from all peers
+        for p in _PEERS_FLAT[idx]:
+            if cands[p] & bit:
+                cands[p] &= ~bit
+                if vals[p] == 0 and cands[p] == 0:
+                    return False
+        return True
 
-    def propagate():
-        """Run constraint propagation until no more progress. Returns False if contradiction."""
+    def propagate(vals, cands):
+        """Iterative constraint propagation. Returns False on contradiction."""
         changed = True
         while changed:
             changed = False
-            # Naked singles: cells with exactly one candidate
-            for r in range(GRID_SIZE):
-                for c in range(GRID_SIZE):
-                    cands = candidates[r][c]
-                    if cands is not None and len(cands) == 1:
-                        val = next(iter(cands))
-                        grid[r][c] = val
-                        candidates[r][c] = None
-                        changed = True
-                        for pr, pc in _PEERS[r][c]:
-                            peer_cands = candidates[pr][pc]
-                            if peer_cands is not None:
-                                if val in peer_cands:
-                                    peer_cands.discard(val)
-                                    if len(peer_cands) == 0:
-                                        return False
+            # Naked singles
+            for idx in range(total):
+                c = cands[idx]
+                if c != 0 and _POPCOUNT[c] == 1:
+                    val = _LSB_VAL[c]
+                    if not assign(idx, val, vals, cands):
+                        return False
+                    changed = True
 
-            # Hidden singles: value that can only go in one place in a unit
-            for r in range(GRID_SIZE):
-                for c in range(GRID_SIZE):
-                    if candidates[r][c] is None:
-                        continue
-                    for unit in _UNITS[r][c]:
-                        for val in list(candidates[r][c]):
-                            # Check if val can go elsewhere in this unit
-                            found_elsewhere = False
-                            for ur, uc in unit:
-                                if candidates[ur][uc] is not None and val in candidates[ur][uc]:
-                                    found_elsewhere = True
-                                    break
-                            if not found_elsewhere:
-                                # val must go here
-                                candidates[r][c] = {val}
-                                changed = True
+            # Hidden singles: for each unit, find values with only one possible cell
+            for unit in _ALL_UNITS:
+                # For each value bit, track which cells can hold it
+                for v in range(N):
+                    bit = 1 << v
+                    place = -1
+                    count = 0
+                    for idx in unit:
+                        if cands[idx] & bit:
+                            count += 1
+                            place = idx
+                            if count > 1:
                                 break
-                        if candidates[r][c] is not None and len(candidates[r][c]) == 1:
-                            break
+                    if count == 0:
+                        # Check if already placed
+                        found = False
+                        for idx in unit:
+                            if vals[idx] == v + 1:
+                                found = True
+                                break
+                        if not found:
+                            return False
+                    elif count == 1:
+                        if vals[place] == 0:
+                            if not assign(place, v + 1, vals, cands):
+                                return False
+                            changed = True
         return True
 
-    def backtrack():
+    def backtrack(vals, cands):
         check_deadline()
 
-        if not propagate():
+        if not propagate(vals, cands):
             return False
 
         # Find unfilled cell with minimum remaining values (MRV)
-        best = None
-        best_count = GRID_SIZE + 1
-        for r in range(GRID_SIZE):
-            for c in range(GRID_SIZE):
-                cands = candidates[r][c]
-                if cands is not None:
-                    if len(cands) < best_count:
-                        best_count = len(cands)
-                        best = (r, c)
-                        if best_count == 1:
-                            break
-            if best_count == 1:
-                break
-
-        if best is None:
-            return True  # all cells filled
-
-        r, c = best
-        for val in list(candidates[r][c]):
-            # Save state
-            old_grid = [row[:] for row in grid]
-            old_cands = [[cell.copy() if cell is not None else None for cell in row] for row in candidates]
-
-            # Place value
-            grid[r][c] = val
-            candidates[r][c] = None
-            # Eliminate from peers
-            contradiction = False
-            for pr, pc in _PEERS[r][c]:
-                peer_cands = candidates[pr][pc]
-                if peer_cands is not None and val in peer_cands:
-                    peer_cands.discard(val)
-                    if len(peer_cands) == 0:
-                        contradiction = True
+        best = -1
+        best_count = N + 1
+        for idx in range(total):
+            c = cands[idx]
+            if c != 0:
+                pc = _POPCOUNT[c]
+                if pc < best_count:
+                    best_count = pc
+                    best = idx
+                    if pc == 2:
                         break
 
-            if not contradiction and backtrack():
+        if best == -1:
+            return True  # all cells filled
+
+        # Try each candidate value
+        c = cands[best]
+        while c:
+            bit = c & (-c)  # lowest set bit
+            val = bit.bit_length()  # 1-indexed value
+            c &= c - 1  # remove lowest bit
+
+            # Save state
+            old_vals = vals[:]
+            old_cands = cands[:]
+
+            if assign(best, val, vals, cands) and backtrack(vals, cands):
                 return True
 
             # Restore state
-            for i in range(GRID_SIZE):
-                for j in range(GRID_SIZE):
-                    grid[i][j] = old_grid[i][j]
-                    candidates[i][j] = old_cands[i][j]
+            vals[:] = old_vals
+            cands[:] = old_cands
 
         return False
 
-    if backtrack():
+    if backtrack(vals, cands):
+        # Write back to grid
+        for r in range(N):
+            for c in range(N):
+                grid[r][c] = vals[r * N + c]
         return grid
     return None
 
