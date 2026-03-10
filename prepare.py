@@ -1,388 +1,284 @@
 """
-One-time data preparation for autoresearch experiments.
-Downloads data shards and trains a BPE tokenizer.
+One-time puzzle preparation and evaluation harness for autoresearch sudoku experiments.
+Generates a fixed set of 16x16 Sudoku puzzles and provides the scoring function.
 
 Usage:
-    python prepare.py                  # full prep (download + tokenizer)
-    python prepare.py --num-shards 8   # download only 8 shards (for testing)
+    python prepare.py                  # generate puzzles
+    python prepare.py --num-puzzles 50 # generate 50 puzzles
 
-Data and tokenizer are stored in ~/.cache/autoresearch/.
+Puzzles are stored in ~/.cache/autoresearch_sudoku/.
 """
 
 import os
-import sys
+import json
+import copy
 import time
-import math
+import random
 import argparse
-import pickle
-from multiprocessing import Pool
-
-import requests
-import pyarrow.parquet as pq
-import rustbpe
-import tiktoken
-import torch
 
 # ---------------------------------------------------------------------------
 # Constants (fixed, do not modify)
 # ---------------------------------------------------------------------------
 
-MAX_SEQ_LEN = 2048       # context length
-TIME_BUDGET = 300        # training time budget in seconds (5 minutes)
-EVAL_TOKENS = 40 * 524288  # number of tokens for val eval
+TIME_BUDGET = 300        # solver time budget in seconds (5 minutes)
+GRID_SIZE = 9           # 9x9 Sudoku
+BOX_H = 3               # box height
+BOX_W = 3               # box width
+NUM_PUZZLES = 100        # number of evaluation puzzles
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "autoresearch")
-DATA_DIR = os.path.join(CACHE_DIR, "data")
-TOKENIZER_DIR = os.path.join(CACHE_DIR, "tokenizer")
-BASE_URL = "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/main"
-MAX_SHARD = 6542 # the last datashard is shard_06542.parquet
-VAL_SHARD = MAX_SHARD  # pinned validation shard (shard_06542)
-VAL_FILENAME = f"shard_{VAL_SHARD:05d}.parquet"
-VOCAB_SIZE = 8192
-
-# BPE split pattern (GPT-4 style, with \p{N}{1,2} instead of {1,3})
-SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
-
-SPECIAL_TOKENS = [f"<|reserved_{i}|>" for i in range(4)]
-BOS_TOKEN = "<|reserved_0|>"
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "autoresearch_sudoku")
+PUZZLES_FILE = os.path.join(CACHE_DIR, "puzzles.json")
+SEED = 42
 
 # ---------------------------------------------------------------------------
-# Data download
+# 16x16 Sudoku puzzle generator
 # ---------------------------------------------------------------------------
 
-def download_single_shard(index):
-    """Download one parquet shard with retries. Returns True on success."""
-    filename = f"shard_{index:05d}.parquet"
-    filepath = os.path.join(DATA_DIR, filename)
-    if os.path.exists(filepath):
-        return True
-
-    url = f"{BASE_URL}/{filename}"
-    max_attempts = 5
-    for attempt in range(1, max_attempts + 1):
-        try:
-            response = requests.get(url, stream=True, timeout=30)
-            response.raise_for_status()
-            temp_path = filepath + ".tmp"
-            with open(temp_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
-            os.rename(temp_path, filepath)
-            print(f"  Downloaded {filename}")
-            return True
-        except (requests.RequestException, IOError) as e:
-            print(f"  Attempt {attempt}/{max_attempts} failed for {filename}: {e}")
-            for path in [filepath + ".tmp", filepath]:
-                if os.path.exists(path):
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
-            if attempt < max_attempts:
-                time.sleep(2 ** attempt)
-    return False
+def _is_valid_placement(grid, row, col, num):
+    """Check if placing num at (row, col) is valid."""
+    size = len(grid)
+    if num in grid[row]:
+        return False
+    if any(grid[r][col] == num for r in range(size)):
+        return False
+    box_r, box_c = (row // BOX_H) * BOX_H, (col // BOX_W) * BOX_W
+    for r in range(box_r, box_r + BOX_H):
+        for c in range(box_c, box_c + BOX_W):
+            if grid[r][c] == num:
+                return False
+    return True
 
 
-def download_data(num_shards, download_workers=8):
-    """Download training shards + pinned validation shard."""
-    os.makedirs(DATA_DIR, exist_ok=True)
-    num_train = min(num_shards, MAX_SHARD)
-    ids = list(range(num_train))
-    if VAL_SHARD not in ids:
-        ids.append(VAL_SHARD)
-
-    # Count what's already downloaded
-    existing = sum(1 for i in ids if os.path.exists(os.path.join(DATA_DIR, f"shard_{i:05d}.parquet")))
-    if existing == len(ids):
-        print(f"Data: all {len(ids)} shards already downloaded at {DATA_DIR}")
-        return
-
-    needed = len(ids) - existing
-    print(f"Data: downloading {needed} shards ({existing} already exist)...")
-
-    workers = max(1, min(download_workers, needed))
-    with Pool(processes=workers) as pool:
-        results = pool.map(download_single_shard, ids)
-
-    ok = sum(1 for r in results if r)
-    print(f"Data: {ok}/{len(ids)} shards ready at {DATA_DIR}")
-
-# ---------------------------------------------------------------------------
-# Tokenizer training
-# ---------------------------------------------------------------------------
-
-def list_parquet_files():
-    """Return sorted list of parquet file paths in the data directory."""
-    files = sorted(f for f in os.listdir(DATA_DIR) if f.endswith(".parquet") and not f.endswith(".tmp"))
-    return [os.path.join(DATA_DIR, f) for f in files]
+def _solve_for_generation(grid):
+    """Solve a grid in-place using backtracking. Returns True if solved."""
+    size = len(grid)
+    for r in range(size):
+        for c in range(size):
+            if grid[r][c] == 0:
+                nums = list(range(1, size + 1))
+                random.shuffle(nums)
+                for num in nums:
+                    if _is_valid_placement(grid, r, c, num):
+                        grid[r][c] = num
+                        if _solve_for_generation(grid):
+                            return True
+                        grid[r][c] = 0
+                return False
+    return True
 
 
-def text_iterator(max_chars=1_000_000_000, doc_cap=10_000):
-    """Yield documents from training split (all shards except pinned val shard)."""
-    parquet_paths = [p for p in list_parquet_files() if not p.endswith(VAL_FILENAME)]
-    nchars = 0
-    for filepath in parquet_paths:
-        pf = pq.ParquetFile(filepath)
-        for rg_idx in range(pf.num_row_groups):
-            rg = pf.read_row_group(rg_idx)
-            for text in rg.column("text").to_pylist():
-                doc = text[:doc_cap] if len(text) > doc_cap else text
-                nchars += len(doc)
-                yield doc
-                if nchars >= max_chars:
-                    return
+def _generate_full_grid(rng_seed):
+    """Generate a complete valid 16x16 Sudoku grid."""
+    random.seed(rng_seed)
+    grid = [[0] * GRID_SIZE for _ in range(GRID_SIZE)]
+    _solve_for_generation(grid)
+    return grid
 
 
-def train_tokenizer():
-    """Train BPE tokenizer using rustbpe, save as tiktoken pickle."""
-    tokenizer_pkl = os.path.join(TOKENIZER_DIR, "tokenizer.pkl")
-    token_bytes_path = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
-
-    if os.path.exists(tokenizer_pkl) and os.path.exists(token_bytes_path):
-        print(f"Tokenizer: already trained at {TOKENIZER_DIR}")
-        return
-
-    os.makedirs(TOKENIZER_DIR, exist_ok=True)
-
-    parquet_files = list_parquet_files()
-    if len(parquet_files) < 2:
-        print("Tokenizer: need at least 2 data shards (1 train + 1 val). Download more data first.")
-        sys.exit(1)
-
-    # --- Train with rustbpe ---
-    print("Tokenizer: training BPE tokenizer...")
-    t0 = time.time()
-
-    tokenizer = rustbpe.Tokenizer()
-    vocab_size_no_special = VOCAB_SIZE - len(SPECIAL_TOKENS)
-    tokenizer.train_from_iterator(text_iterator(), vocab_size_no_special, pattern=SPLIT_PATTERN)
-
-    # Build tiktoken encoding from trained merges
-    pattern = tokenizer.get_pattern()
-    mergeable_ranks = {bytes(k): v for k, v in tokenizer.get_mergeable_ranks()}
-    tokens_offset = len(mergeable_ranks)
-    special_tokens = {name: tokens_offset + i for i, name in enumerate(SPECIAL_TOKENS)}
-    enc = tiktoken.Encoding(
-        name="rustbpe",
-        pat_str=pattern,
-        mergeable_ranks=mergeable_ranks,
-        special_tokens=special_tokens,
-    )
-
-    # Save tokenizer
-    with open(tokenizer_pkl, "wb") as f:
-        pickle.dump(enc, f)
-
-    t1 = time.time()
-    print(f"Tokenizer: trained in {t1 - t0:.1f}s, saved to {tokenizer_pkl}")
-
-    # --- Build token_bytes lookup for BPB evaluation ---
-    print("Tokenizer: building token_bytes lookup...")
-    special_set = set(SPECIAL_TOKENS)
-    token_bytes_list = []
-    for token_id in range(enc.n_vocab):
-        token_str = enc.decode([token_id])
-        if token_str in special_set:
-            token_bytes_list.append(0)
-        else:
-            token_bytes_list.append(len(token_str.encode("utf-8")))
-    token_bytes_tensor = torch.tensor(token_bytes_list, dtype=torch.int32)
-    torch.save(token_bytes_tensor, token_bytes_path)
-    print(f"Tokenizer: saved token_bytes to {token_bytes_path}")
-
-    # Sanity check
-    test = "Hello world! Numbers: 123. Unicode: 你好"
-    encoded = enc.encode_ordinary(test)
-    decoded = enc.decode(encoded)
-    assert decoded == test, f"Tokenizer roundtrip failed: {test!r} -> {decoded!r}"
-    print(f"Tokenizer: sanity check passed (vocab_size={enc.n_vocab})")
-
-# ---------------------------------------------------------------------------
-# Runtime utilities (imported by train.py)
-# ---------------------------------------------------------------------------
-
-class Tokenizer:
-    """Minimal tokenizer wrapper. Training is handled above."""
-
-    def __init__(self, enc):
-        self.enc = enc
-        self.bos_token_id = enc.encode_single_token(BOS_TOKEN)
-
-    @classmethod
-    def from_directory(cls, tokenizer_dir=TOKENIZER_DIR):
-        with open(os.path.join(tokenizer_dir, "tokenizer.pkl"), "rb") as f:
-            enc = pickle.load(f)
-        return cls(enc)
-
-    def get_vocab_size(self):
-        return self.enc.n_vocab
-
-    def get_bos_token_id(self):
-        return self.bos_token_id
-
-    def encode(self, text, prepend=None, num_threads=8):
-        if prepend is not None:
-            prepend_id = prepend if isinstance(prepend, int) else self.enc.encode_single_token(prepend)
-        if isinstance(text, str):
-            ids = self.enc.encode_ordinary(text)
-            if prepend is not None:
-                ids.insert(0, prepend_id)
-        elif isinstance(text, list):
-            ids = self.enc.encode_ordinary_batch(text, num_threads=num_threads)
-            if prepend is not None:
-                for row in ids:
-                    row.insert(0, prepend_id)
-        else:
-            raise ValueError(f"Invalid input type: {type(text)}")
-        return ids
-
-    def decode(self, ids):
-        return self.enc.decode(ids)
+def _create_puzzle(full_grid, num_clues, rng_seed):
+    """Remove cells from a full grid to create a puzzle with num_clues given."""
+    random.seed(rng_seed)
+    puzzle = copy.deepcopy(full_grid)
+    total_cells = GRID_SIZE * GRID_SIZE
+    cells_to_remove = total_cells - num_clues
+    positions = [(r, c) for r in range(GRID_SIZE) for c in range(GRID_SIZE)]
+    random.shuffle(positions)
+    removed = 0
+    for r, c in positions:
+        if removed >= cells_to_remove:
+            break
+        puzzle[r][c] = 0
+        removed += 1
+    return puzzle
 
 
-def get_token_bytes(device="cpu"):
-    path = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
-    with open(path, "rb") as f:
-        return torch.load(f, map_location=device)
+def generate_puzzles(num_puzzles=NUM_PUZZLES, seed=SEED):
+    """Generate a set of 16x16 Sudoku puzzles with varying difficulty."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
+    if os.path.exists(PUZZLES_FILE):
+        print(f"Puzzles: already generated at {PUZZLES_FILE}")
+        return load_puzzles()
+
+    print(f"Generating {num_puzzles} 16x16 Sudoku puzzles...")
+    puzzles = []
+
+    for i in range(num_puzzles):
+        # Vary difficulty: 80-120 clues out of 256 cells
+        clues = 80 + (i * 40 // num_puzzles)
+        grid_seed = seed + i * 1000
+        puzzle_seed = seed + i * 1000 + 500
+
+        full_grid = _generate_full_grid(grid_seed)
+        puzzle = _create_puzzle(full_grid, clues, puzzle_seed)
+
+        puzzles.append({
+            "id": i,
+            "clues": clues,
+            "puzzle": puzzle,
+            "solution": full_grid,
+        })
+
+        if (i + 1) % 10 == 0:
+            print(f"  Generated {i + 1}/{num_puzzles} puzzles")
+
+    with open(PUZZLES_FILE, "w") as f:
+        json.dump(puzzles, f)
+
+    print(f"Puzzles: saved {num_puzzles} puzzles to {PUZZLES_FILE}")
+    return puzzles
 
 
-def _document_batches(split, tokenizer_batch_size=128):
-    """Infinite iterator over document batches from parquet files."""
-    parquet_paths = list_parquet_files()
-    assert len(parquet_paths) > 0, "No parquet files found. Run prepare.py first."
-    val_path = os.path.join(DATA_DIR, VAL_FILENAME)
-    if split == "train":
-        parquet_paths = [p for p in parquet_paths if p != val_path]
-    else:
-        parquet_paths = [val_path]
-    epoch = 1
-    while True:
-        for filepath in parquet_paths:
-            pf = pq.ParquetFile(filepath)
-            for rg_idx in range(pf.num_row_groups):
-                rg = pf.read_row_group(rg_idx)
-                batch = rg.column('text').to_pylist()
-                for i in range(0, len(batch), tokenizer_batch_size):
-                    yield batch[i:i+tokenizer_batch_size], epoch
-        epoch += 1
-
-
-def make_dataloader(tokenizer, B, T, split, buffer_size=1000):
-    """
-    BOS-aligned dataloader with best-fit packing.
-    Every row starts with BOS. Documents packed using best-fit to minimize cropping.
-    When no document fits remaining space, crops shortest doc to fill exactly.
-    100% utilization (no padding).
-    """
-    assert split in ["train", "val"]
-    row_capacity = T + 1
-    batches = _document_batches(split)
-    bos_token = tokenizer.get_bos_token_id()
-    doc_buffer = []
-    epoch = 1
-
-    def refill_buffer():
-        nonlocal epoch
-        doc_batch, epoch = next(batches)
-        token_lists = tokenizer.encode(doc_batch, prepend=bos_token)
-        doc_buffer.extend(token_lists)
-
-    # Pre-allocate buffers: [inputs (B*T) | targets (B*T)]
-    row_buffer = torch.empty((B, row_capacity), dtype=torch.long)
-    cpu_buffer = torch.empty(2 * B * T, dtype=torch.long, pin_memory=True)
-    gpu_buffer = torch.empty(2 * B * T, dtype=torch.long, device="cuda")
-    cpu_inputs = cpu_buffer[:B * T].view(B, T)
-    cpu_targets = cpu_buffer[B * T:].view(B, T)
-    inputs = gpu_buffer[:B * T].view(B, T)
-    targets = gpu_buffer[B * T:].view(B, T)
-
-    while True:
-        for row_idx in range(B):
-            pos = 0
-            while pos < row_capacity:
-                while len(doc_buffer) < buffer_size:
-                    refill_buffer()
-
-                remaining = row_capacity - pos
-
-                # Find largest doc that fits entirely
-                best_idx = -1
-                best_len = 0
-                for i, doc in enumerate(doc_buffer):
-                    doc_len = len(doc)
-                    if doc_len <= remaining and doc_len > best_len:
-                        best_idx = i
-                        best_len = doc_len
-
-                if best_idx >= 0:
-                    doc = doc_buffer.pop(best_idx)
-                    row_buffer[row_idx, pos:pos + len(doc)] = torch.tensor(doc, dtype=torch.long)
-                    pos += len(doc)
-                else:
-                    # No doc fits — crop shortest to fill remaining
-                    shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i]))
-                    doc = doc_buffer.pop(shortest_idx)
-                    row_buffer[row_idx, pos:pos + remaining] = torch.tensor(doc[:remaining], dtype=torch.long)
-                    pos += remaining
-
-        cpu_inputs.copy_(row_buffer[:, :-1])
-        cpu_targets.copy_(row_buffer[:, 1:])
-        gpu_buffer.copy_(cpu_buffer, non_blocking=True)
-        yield inputs, targets, epoch
+def load_puzzles():
+    """Load puzzles from disk."""
+    with open(PUZZLES_FILE, "r") as f:
+        return json.load(f)
 
 # ---------------------------------------------------------------------------
 # Evaluation (DO NOT CHANGE — this is the fixed metric)
 # ---------------------------------------------------------------------------
 
-@torch.no_grad()
-def evaluate_bpb(model, tokenizer, batch_size):
+def validate_solution(puzzle, solution, expected_solution):
     """
-    Bits per byte (BPB): vocab size-independent evaluation metric.
-    Sums per-token cross-entropy (in nats), sums target byte lengths,
-    then converts nats/byte to bits/byte. Special tokens (byte length 0)
-    are excluded from both sums.
-    Uses fixed MAX_SEQ_LEN so results are comparable across configs.
+    Validate a proposed solution against the puzzle and expected solution.
+    Returns (is_correct, error_message).
     """
-    token_bytes = get_token_bytes(device="cuda")
-    val_loader = make_dataloader(tokenizer, batch_size, MAX_SEQ_LEN, "val")
-    steps = EVAL_TOKENS // (batch_size * MAX_SEQ_LEN)
-    total_nats = 0.0
-    total_bytes = 0
-    for _ in range(steps):
-        x, y, _ = next(val_loader)
-        loss_flat = model(x, y, reduction='none').view(-1)
-        y_flat = y.view(-1)
-        nbytes = token_bytes[y_flat]
-        mask = nbytes > 0
-        total_nats += (loss_flat * mask).sum().item()
-        total_bytes += nbytes.sum().item()
-    return total_nats / (math.log(2) * total_bytes)
+    if solution is None:
+        return False, "No solution returned"
+
+    if len(solution) != GRID_SIZE:
+        return False, f"Wrong number of rows: {len(solution)}"
+    for r in range(GRID_SIZE):
+        if len(solution[r]) != GRID_SIZE:
+            return False, f"Wrong number of columns in row {r}: {len(solution[r])}"
+
+    # Check that all original clues are preserved
+    for r in range(GRID_SIZE):
+        for c in range(GRID_SIZE):
+            if puzzle[r][c] != 0 and solution[r][c] != puzzle[r][c]:
+                return False, f"Clue at ({r},{c}) was changed: {puzzle[r][c]} -> {solution[r][c]}"
+
+    # Check all values are in [1, GRID_SIZE]
+    for r in range(GRID_SIZE):
+        for c in range(GRID_SIZE):
+            if not (1 <= solution[r][c] <= GRID_SIZE):
+                return False, f"Invalid value at ({r},{c}): {solution[r][c]}"
+
+    # Check rows
+    for r in range(GRID_SIZE):
+        if len(set(solution[r])) != GRID_SIZE:
+            return False, f"Duplicate in row {r}"
+
+    # Check columns
+    for c in range(GRID_SIZE):
+        col = [solution[r][c] for r in range(GRID_SIZE)]
+        if len(set(col)) != GRID_SIZE:
+            return False, f"Duplicate in column {c}"
+
+    # Check boxes
+    for box_r in range(0, GRID_SIZE, BOX_H):
+        for box_c in range(0, GRID_SIZE, BOX_W):
+            box = []
+            for r in range(box_r, box_r + BOX_H):
+                for c in range(box_c, box_c + BOX_W):
+                    box.append(solution[r][c])
+            if len(set(box)) != GRID_SIZE:
+                return False, f"Duplicate in box starting at ({box_r},{box_c})"
+
+    return True, "OK"
+
+
+def evaluate_solver(solve_fn, puzzles, time_budget=TIME_BUDGET):
+    """
+    Evaluate a solver function on the puzzle set within the time budget.
+
+    Args:
+        solve_fn: function(puzzle) -> solution_grid or None
+        puzzles: list of puzzle dicts from load_puzzles()
+        time_budget: max seconds for the entire evaluation
+
+    Returns dict with:
+        - puzzles_solved: number of correctly solved puzzles
+        - puzzles_attempted: number of puzzles attempted
+        - total_time: total wall clock time used
+        - avg_time_per_solved: average time per solved puzzle
+        - solve_rate: fraction of attempted puzzles solved correctly
+        - results: list of per-puzzle results
+    """
+    results = []
+    puzzles_solved = 0
+    puzzles_attempted = 0
+    t_start = time.time()
+
+    for p in puzzles:
+        elapsed = time.time() - t_start
+        if elapsed >= time_budget:
+            break
+
+        puzzle = p["puzzle"]
+        expected = p["solution"]
+        puzzle_id = p["id"]
+
+        t_puzzle_start = time.time()
+        try:
+            solution = solve_fn(copy.deepcopy(puzzle))
+        except Exception as e:
+            solution = None
+            results.append({
+                "id": puzzle_id,
+                "solved": False,
+                "time": time.time() - t_puzzle_start,
+                "error": str(e),
+            })
+            puzzles_attempted += 1
+            continue
+
+        t_puzzle_end = time.time()
+        puzzle_time = t_puzzle_end - t_puzzle_start
+
+        is_correct, msg = validate_solution(puzzle, solution, expected)
+
+        results.append({
+            "id": puzzle_id,
+            "solved": is_correct,
+            "time": puzzle_time,
+            "error": None if is_correct else msg,
+        })
+
+        puzzles_attempted += 1
+        if is_correct:
+            puzzles_solved += 1
+
+    total_time = time.time() - t_start
+    avg_time = total_time / puzzles_solved if puzzles_solved > 0 else float("inf")
+
+    return {
+        "puzzles_solved": puzzles_solved,
+        "puzzles_attempted": puzzles_attempted,
+        "total_puzzles": len(puzzles),
+        "total_time": total_time,
+        "avg_time_per_solved": avg_time,
+        "solve_rate": puzzles_solved / puzzles_attempted if puzzles_attempted > 0 else 0.0,
+        "results": results,
+    }
+
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Prepare data and tokenizer for autoresearch")
-    parser.add_argument("--num-shards", type=int, default=10, help="Number of training shards to download (-1 = all). Val shard is always pinned.")
-    parser.add_argument("--download-workers", type=int, default=8, help="Number of parallel download workers")
+    parser = argparse.ArgumentParser(description="Generate 16x16 Sudoku puzzles for autoresearch")
+    parser.add_argument("--num-puzzles", type=int, default=NUM_PUZZLES, help="Number of puzzles to generate")
     args = parser.parse_args()
-
-    num_shards = MAX_SHARD if args.num_shards == -1 else args.num_shards
 
     print(f"Cache directory: {CACHE_DIR}")
     print()
 
-    # Step 1: Download data
-    download_data(num_shards, download_workers=args.download_workers)
+    puzzles = generate_puzzles(num_puzzles=args.num_puzzles)
     print()
-
-    # Step 2: Train tokenizer
-    train_tokenizer()
-    print()
-    print("Done! Ready to train.")
+    print(f"Done! Generated {len(puzzles)} puzzles. Ready to solve.")
