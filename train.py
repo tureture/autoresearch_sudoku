@@ -58,11 +58,35 @@ def _get_data(grid_size, box_h, box_w):
     return data
 
 # ---------------------------------------------------------------------------
+# Precomputed box-line intersection data cache
+# ---------------------------------------------------------------------------
+_bl_cache = {}
+
+def _get_box_line_data(grid_size, box_h, box_w):
+    key = (grid_size, box_h, box_w)
+    if key in _bl_cache:
+        return _bl_cache[key]
+    N = grid_size
+    _, _, _, units = _get_data(grid_size, box_h, box_w)
+    # Row units: 0..N-1, Col units: N..2N-1, Box units: 2N..3N-1
+    pairs = []
+    for bi in range(2 * N, len(units)):
+        box = set(units[bi])
+        for li in range(2 * N):  # rows and columns
+            line = set(units[li])
+            inter = box & line
+            if len(inter) >= 2:
+                pairs.append((tuple(inter), tuple(box - inter), tuple(line - inter)))
+    _bl_cache[key] = pairs
+    return pairs
+
+# ---------------------------------------------------------------------------
 # Solver
 # ---------------------------------------------------------------------------
 
 def solve(grid, grid_size, box_h, box_w):
     N, ALL_BITS, PEERS, UNITS = _get_data(grid_size, box_h, box_w)
+    BL_PAIRS = _get_box_line_data(grid_size, box_h, box_w)
     total = N * N
 
     # Flat arrays for grid values and candidate bitmasks
@@ -156,6 +180,85 @@ def solve(grid, grid_size, box_h, box_w):
                                         if cands[unit[k]].bit_count() == 1:
                                             changed = True
                                 break
+
+            # Hidden pairs
+            for unit in UNITS:
+                ulen = len(unit)
+                for vi in range(N):
+                    bi = 1 << vi
+                    # Collect cells where vi is a candidate
+                    locs_i = 0  # bitmask of positions in unit
+                    cnt_i = 0
+                    for k in range(ulen):
+                        if cands[unit[k]] & bi:
+                            locs_i |= 1 << k
+                            cnt_i += 1
+                    if cnt_i < 2 or cnt_i > 3:
+                        continue
+                    for vj in range(vi + 1, N):
+                        bj = 1 << vj
+                        locs_j = 0
+                        cnt_j = 0
+                        for k in range(ulen):
+                            if cands[unit[k]] & bj:
+                                locs_j |= 1 << k
+                                cnt_j += 1
+                        if locs_j != locs_i:
+                            continue
+                        if cnt_i != 2:
+                            continue
+                        # Hidden pair: vi and vj only in these 2 cells
+                        pair_bits = bi | bj
+                        loc = locs_i
+                        while loc:
+                            lb = loc & (-loc)
+                            k = lb.bit_length() - 1
+                            loc &= loc - 1
+                            if cands[unit[k]] & ~pair_bits:
+                                cands[unit[k]] &= pair_bits
+                                if cands[unit[k]] == 0:
+                                    return False
+                                changed = True
+
+            # Box-line reduction (pointing pairs / claiming)
+            for inter, box_other, line_other in BL_PAIRS:
+                for v in range(N):
+                    bit = 1 << v
+                    # Check if value is confined to intersection within box
+                    in_inter = False
+                    for idx in inter:
+                        if cands[idx] & bit:
+                            in_inter = True
+                            break
+                    if not in_inter:
+                        continue
+                    in_box_other = False
+                    for idx in box_other:
+                        if cands[idx] & bit:
+                            in_box_other = True
+                            break
+                    if not in_box_other:
+                        # Pointing: eliminate from rest of line
+                        for idx in line_other:
+                            if cands[idx] & bit:
+                                cands[idx] &= ~bit
+                                if vals[idx] == 0 and cands[idx] == 0:
+                                    return False
+                                changed = True
+                    else:
+                        # Check claiming: value confined to intersection within line
+                        in_line_other = False
+                        for idx in line_other:
+                            if cands[idx] & bit:
+                                in_line_other = True
+                                break
+                        if not in_line_other:
+                            for idx in box_other:
+                                if cands[idx] & bit:
+                                    cands[idx] &= ~bit
+                                    if vals[idx] == 0 and cands[idx] == 0:
+                                        return False
+                                    changed = True
         return True
 
     def backtrack(vals, cands):
