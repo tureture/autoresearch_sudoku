@@ -93,9 +93,9 @@ def solve(grid, grid_size, box_h, box_w):
     BL_PAIRS = _get_box_line_data(grid_size, box_h, box_w)
     total = N * N
 
-    # Per-puzzle timeout: 10s for 25x25, generous for smaller
+    # Per-puzzle timeout: 5s for 25x25, generous for smaller
     if grid_size >= 25:
-        puzzle_deadline = time.time() + 10.0
+        puzzle_deadline = time.time() + 5.0
     elif grid_size >= 16:
         puzzle_deadline = time.time() + 30.0
     else:
