@@ -155,8 +155,14 @@ def solve(grid, grid_size, box_h, box_w):
 
                 # Hidden singles
                 for unit in UNITS:
-                    for v in range(N):
-                        bit = 1 << v
+                    placed = 0
+                    for idx in unit:
+                        if vals[idx]:
+                            placed |= 1 << (vals[idx] - 1)
+                    need = ALL_BITS & ~placed
+                    while need:
+                        bit = need & (-need)
+                        need &= need - 1
                         place = -1
                         count = 0
                         for idx in unit:
@@ -166,18 +172,11 @@ def solve(grid, grid_size, box_h, box_w):
                                 if count > 1:
                                     break
                         if count == 0:
-                            found = False
-                            for idx in unit:
-                                if vals[idx] == v + 1:
-                                    found = True
-                                    break
-                            if not found:
+                            return False
+                        elif count == 1 and vals[place] == 0:
+                            if not assign(place, bit.bit_length(), vals, cands):
                                 return False
-                        elif count == 1:
-                            if vals[place] == 0:
-                                if not assign(place, v + 1, vals, cands):
-                                    return False
-                                changed = True
+                            changed = True
 
                 # Naked pairs + naked triples
                 for unit in UNITS:
