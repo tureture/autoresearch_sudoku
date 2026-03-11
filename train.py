@@ -179,14 +179,18 @@ def solve(grid, grid_size, box_h, box_w):
                                     return False
                                 changed = True
 
-                # Naked pairs
+                # Naked pairs + naked triples
                 for unit in UNITS:
-                    for i in range(len(unit)):
+                    ulen = len(unit)
+                    for i in range(ulen):
                         ci = cands[unit[i]]
-                        if ci != 0 and ci.bit_count() == 2:
-                            for j in range(i + 1, len(unit)):
+                        if ci == 0:
+                            continue
+                        bc = ci.bit_count()
+                        if bc == 2:
+                            for j in range(i + 1, ulen):
                                 if cands[unit[j]] == ci:
-                                    for k in range(len(unit)):
+                                    for k in range(ulen):
                                         if k != i and k != j and cands[unit[k]] & ci:
                                             cands[unit[k]] &= ~ci
                                             if vals[unit[k]] == 0 and cands[unit[k]] == 0:
@@ -194,6 +198,28 @@ def solve(grid, grid_size, box_h, box_w):
                                             if cands[unit[k]].bit_count() == 1:
                                                 changed = True
                                     break
+                        if bc == 2 or bc == 3:
+                            for j in range(i + 1, ulen):
+                                cj = cands[unit[j]]
+                                if cj == 0:
+                                    continue
+                                combo = ci | cj
+                                if combo.bit_count() > 3:
+                                    continue
+                                for m in range(j + 1, ulen):
+                                    cm = cands[unit[m]]
+                                    if cm == 0:
+                                        continue
+                                    triple = combo | cm
+                                    if triple.bit_count() != 3:
+                                        continue
+                                    for k in range(ulen):
+                                        if k != i and k != j and k != m and cands[unit[k]] & triple:
+                                            cands[unit[k]] &= ~triple
+                                            if vals[unit[k]] == 0 and cands[unit[k]] == 0:
+                                                return False
+                                            if cands[unit[k]].bit_count() == 1:
+                                                changed = True
 
             # SLOW PHASE: hidden pairs + box-line reduction (only when fast phase exhausted)
             slow_changed = False
