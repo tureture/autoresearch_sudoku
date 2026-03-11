@@ -278,15 +278,16 @@ def solve(grid, grid_size, box_h, box_w):
 
             # Box-line reduction (pointing pairs / claiming)
             for inter, box_other, line_other in BL_PAIRS:
-                for v in range(N):
-                    bit = 1 << v
-                    in_inter = False
-                    for idx in inter:
-                        if cands[idx] & bit:
-                            in_inter = True
-                            break
-                    if not in_inter:
-                        continue
+                # Compute candidate mask for intersection cells
+                inter_cands = 0
+                for idx in inter:
+                    inter_cands |= cands[idx]
+                if not inter_cands:
+                    continue
+                need = inter_cands
+                while need:
+                    bit = need & (-need)
+                    need &= need - 1
                     in_box_other = False
                     for idx in box_other:
                         if cands[idx] & bit:
