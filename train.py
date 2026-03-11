@@ -97,10 +97,9 @@ def solve(grid, grid_size, box_h, box_w):
     BL_PAIRS = _get_box_line_data(grid_size, box_h, box_w)
     total = N * N
 
-    # Per-puzzle timeout
+    # Per-puzzle timeout: 5s for 25x25, generous for smaller
     if grid_size >= 25:
-        puzzle_deadline = time.time() + 10.0
-        attempt_budget = 2.0  # each attempt gets 2s, retry with different ordering
+        puzzle_deadline = time.time() + 5.0
     elif grid_size >= 16:
         puzzle_deadline = time.time() + 30.0
         attempt_budget = 30.0
