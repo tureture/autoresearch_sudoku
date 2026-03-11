@@ -310,10 +310,14 @@ def solve(grid, grid_size, box_h, box_w):
                 break
         return True
 
+    _bt_count = [0]
+
     def backtrack(vals, cands):
-        check_deadline()
-        if puzzle_deadline and time.time() > puzzle_deadline:
-            raise _PuzzleTimeout()
+        _bt_count[0] += 1
+        if _bt_count[0] & 0xFF == 0:
+            check_deadline()
+            if puzzle_deadline and time.time() > puzzle_deadline:
+                raise _PuzzleTimeout()
 
         if not propagate(vals, cands):
             return False
