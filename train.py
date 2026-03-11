@@ -226,8 +226,21 @@ def solve(grid, grid_size, box_h, box_w):
             # Hidden pairs
             for unit in UNITS:
                 ulen = len(unit)
-                for vi in range(N):
-                    bi = 1 << vi
+                placed = 0
+                for k in range(ulen):
+                    if vals[unit[k]]:
+                        placed |= 1 << (vals[unit[k]] - 1)
+                need = ALL_BITS & ~placed
+                # Iterate over unplaced values
+                need_list = []
+                tmp = need
+                while tmp:
+                    b = tmp & (-tmp)
+                    need_list.append(b)
+                    tmp &= tmp - 1
+                nl = len(need_list)
+                for ai in range(nl):
+                    bi = need_list[ai]
                     locs_i = 0
                     cnt_i = 0
                     for k in range(ulen):
@@ -236,8 +249,8 @@ def solve(grid, grid_size, box_h, box_w):
                             cnt_i += 1
                     if cnt_i != 2:
                         continue
-                    for vj in range(vi + 1, N):
-                        bj = 1 << vj
+                    for aj in range(ai + 1, nl):
+                        bj = need_list[aj]
                         locs_j = 0
                         for k in range(ulen):
                             if cands[unit[k]] & bj:
