@@ -11,6 +11,10 @@ import copy
 
 from prepare import TIME_BUDGET, load_puzzles, evaluate_solver, check_deadline
 
+# Per-puzzle timeout exception (caught inside solve, not by harness)
+class _PuzzleTimeout(Exception):
+    pass
+
 # ---------------------------------------------------------------------------
 # Per-size precomputed data cache
 # ---------------------------------------------------------------------------
@@ -88,6 +92,14 @@ def solve(grid, grid_size, box_h, box_w):
     N, ALL_BITS, PEERS, UNITS = _get_data(grid_size, box_h, box_w)
     BL_PAIRS = _get_box_line_data(grid_size, box_h, box_w)
     total = N * N
+
+    # Per-puzzle timeout: 10s for 25x25, generous for smaller
+    if grid_size >= 25:
+        puzzle_deadline = time.time() + 10.0
+    elif grid_size >= 16:
+        puzzle_deadline = time.time() + 30.0
+    else:
+        puzzle_deadline = 0  # no per-puzzle limit for 9x9
 
     # Flat arrays for grid values and candidate bitmasks
     vals = [0] * total
@@ -262,6 +274,8 @@ def solve(grid, grid_size, box_h, box_w):
 
     def backtrack(vals, cands):
         check_deadline()
+        if puzzle_deadline and time.time() > puzzle_deadline:
+            raise _PuzzleTimeout()
 
         if not propagate(vals, cands):
             return False
@@ -302,11 +316,14 @@ def solve(grid, grid_size, box_h, box_w):
 
         return False
 
-    if backtrack(vals, cands):
-        for r in range(N):
-            for c in range(N):
-                grid[r][c] = vals[r * N + c]
-        return grid
+    try:
+        if backtrack(vals, cands):
+            for r in range(N):
+                for c in range(N):
+                    grid[r][c] = vals[r * N + c]
+            return grid
+    except _PuzzleTimeout:
+        pass
     return None
 
 # ---------------------------------------------------------------------------
