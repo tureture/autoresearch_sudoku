@@ -99,8 +99,8 @@ def solve(grid, grid_size, box_h, box_w):
 
     # Per-puzzle timeout
     if grid_size >= 25:
-        puzzle_deadline = time.time() + 12.0
-        attempt_budget = 3.0  # each attempt gets 3s, retry with different ordering
+        puzzle_deadline = time.time() + 15.0
+        attempt_budget = 2.0  # each attempt gets 2s, retry with different ordering
     elif grid_size >= 16:
         puzzle_deadline = time.time() + 30.0
         attempt_budget = 30.0
