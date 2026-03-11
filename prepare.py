@@ -1,10 +1,9 @@
 """
-One-time puzzle preparation and evaluation harness for autoresearch sudoku experiments.
-Generates a fixed set of 16x16 Sudoku puzzles and provides the scoring function.
+Puzzle preparation and evaluation harness for autoresearch sudoku experiments.
+Generates sets of 9x9, 16x16, and 25x25 Sudoku puzzles and provides scoring.
 
 Usage:
-    python prepare.py                  # generate puzzles
-    python prepare.py --num-puzzles 50 # generate 50 puzzles
+    python prepare.py          # generate all puzzles
 
 Puzzles are stored in data/ inside the repo.
 """
@@ -17,14 +16,20 @@ import random
 import argparse
 
 # ---------------------------------------------------------------------------
-# Constants (fixed, do not modify)
+# Constants
 # ---------------------------------------------------------------------------
 
 TIME_BUDGET = 300       # solver time budget in seconds (5 minutes)
-GRID_SIZE = 16           # 16x16 Sudoku
-BOX_H = 4               # box height
-BOX_W = 4               # box width
-NUM_PUZZLES = 10        # number of evaluation puzzles
+SEED = 42
+
+TIERS = [
+    {"grid_size": 9,  "box_h": 3, "box_w": 3, "num_puzzles": 100, "label": "9x9",
+     "min_clues": 25, "max_clues": 40},
+    {"grid_size": 16, "box_h": 4, "box_w": 4, "num_puzzles": 100, "label": "16x16",
+     "min_clues": 80, "max_clues": 120},
+    {"grid_size": 25, "box_h": 5, "box_w": 5, "num_puzzles": 100, "label": "25x25",
+     "min_clues": 200, "max_clues": 300},
+]
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -32,60 +37,75 @@ NUM_PUZZLES = 10        # number of evaluation puzzles
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 PUZZLES_FILE = os.path.join(DATA_DIR, "puzzles.json")
-SEED = 42
 
 # ---------------------------------------------------------------------------
-# 16x16 Sudoku puzzle generator
+# Puzzle generator (pattern-based + shuffle for fast generation at any size)
 # ---------------------------------------------------------------------------
 
-def _is_valid_placement(grid, row, col, num):
-    """Check if placing num at (row, col) is valid."""
-    size = len(grid)
-    if num in grid[row]:
-        return False
-    if any(grid[r][col] == num for r in range(size)):
-        return False
-    box_r, box_c = (row // BOX_H) * BOX_H, (col // BOX_W) * BOX_W
-    for r in range(box_r, box_r + BOX_H):
-        for c in range(box_c, box_c + BOX_W):
-            if grid[r][c] == num:
-                return False
-    return True
-
-
-def _solve_for_generation(grid):
-    """Solve a grid in-place using backtracking. Returns True if solved."""
-    size = len(grid)
-    for r in range(size):
-        for c in range(size):
-            if grid[r][c] == 0:
-                nums = list(range(1, size + 1))
-                random.shuffle(nums)
-                for num in nums:
-                    if _is_valid_placement(grid, r, c, num):
-                        grid[r][c] = num
-                        if _solve_for_generation(grid):
-                            return True
-                        grid[r][c] = 0
-                return False
-    return True
-
-
-def _generate_full_grid(rng_seed):
-    """Generate a complete valid 16x16 Sudoku grid."""
+def _generate_full_grid(grid_size, box_h, box_w, rng_seed):
+    """Generate a complete valid Sudoku grid using pattern construction + shuffling."""
     random.seed(rng_seed)
-    grid = [[0] * GRID_SIZE for _ in range(GRID_SIZE)]
-    _solve_for_generation(grid)
+    n = grid_size
+
+    # Base pattern: produces a valid Sudoku grid
+    def pattern(r, c):
+        return (box_w * (r % box_h) + r // box_h + c) % n
+
+    grid = [[pattern(r, c) + 1 for c in range(n)] for r in range(n)]
+
+    # Permute values
+    perm = list(range(1, n + 1))
+    random.shuffle(perm)
+    grid = [[perm[grid[r][c] - 1] for c in range(n)] for r in range(n)]
+
+    # Shuffle rows within each band
+    for band_start in range(0, n, box_h):
+        rows = list(range(band_start, band_start + box_h))
+        random.shuffle(rows)
+        shuffled = [grid[r][:] for r in rows]
+        for i, r in enumerate(range(band_start, band_start + box_h)):
+            grid[r] = shuffled[i]
+
+    # Shuffle columns within each stack
+    for stack_start in range(0, n, box_w):
+        cols = list(range(stack_start, stack_start + box_w))
+        random.shuffle(cols)
+        for r in range(n):
+            vals = [grid[r][c] for c in cols]
+            for i, c in enumerate(range(stack_start, stack_start + box_w)):
+                grid[r][c] = vals[i]
+
+    # Shuffle bands (groups of box_h rows)
+    num_bands = n // box_h
+    band_order = list(range(num_bands))
+    random.shuffle(band_order)
+    new_grid = []
+    for b in band_order:
+        for r in range(b * box_h, (b + 1) * box_h):
+            new_grid.append(grid[r][:])
+    grid = new_grid
+
+    # Shuffle stacks (groups of box_w columns)
+    num_stacks = n // box_w
+    stack_order = list(range(num_stacks))
+    random.shuffle(stack_order)
+    for r in range(n):
+        new_row = []
+        for s in stack_order:
+            for c in range(s * box_w, (s + 1) * box_w):
+                new_row.append(grid[r][c])
+        grid[r] = new_row
+
     return grid
 
 
-def _create_puzzle(full_grid, num_clues, rng_seed):
-    """Remove cells from a full grid to create a puzzle with num_clues given."""
+def _create_puzzle(full_grid, grid_size, num_clues, rng_seed):
+    """Remove cells from a full grid to create a puzzle with num_clues clues."""
     random.seed(rng_seed)
     puzzle = copy.deepcopy(full_grid)
-    total_cells = GRID_SIZE * GRID_SIZE
+    total_cells = grid_size * grid_size
     cells_to_remove = total_cells - num_clues
-    positions = [(r, c) for r in range(GRID_SIZE) for c in range(GRID_SIZE)]
+    positions = [(r, c) for r in range(grid_size) for c in range(grid_size)]
     random.shuffle(positions)
     removed = 0
     for r, c in positions:
@@ -97,119 +117,129 @@ def _create_puzzle(full_grid, num_clues, rng_seed):
 
 
 def _current_config():
-    """Return the config dict that gets embedded in puzzles.json."""
+    """Config dict embedded in puzzles.json for cache invalidation."""
     return {
-        "grid_size": GRID_SIZE,
-        "box_h": BOX_H,
-        "box_w": BOX_W,
-        "num_puzzles": NUM_PUZZLES,
+        "tiers": [
+            {"grid_size": t["grid_size"], "box_h": t["box_h"], "box_w": t["box_w"],
+             "num_puzzles": t["num_puzzles"], "min_clues": t["min_clues"],
+             "max_clues": t["max_clues"]}
+            for t in TIERS
+        ],
         "seed": SEED,
     }
 
 
-def generate_puzzles(num_puzzles=NUM_PUZZLES, seed=SEED):
-    """Generate a set of Sudoku puzzles with varying difficulty."""
+def generate_puzzles(seed=SEED):
+    """Generate all puzzle tiers."""
     os.makedirs(DATA_DIR, exist_ok=True)
 
     if os.path.exists(PUZZLES_FILE):
         with open(PUZZLES_FILE, "r") as f:
             data = json.load(f)
-        saved_config = data.get("config", {})
-        if saved_config == _current_config():
+        if data.get("config") == _current_config():
             print(f"Puzzles: already generated at {PUZZLES_FILE}")
             return data["puzzles"]
         print("Config changed, regenerating puzzles...")
 
-    print(f"Generating {num_puzzles} {GRID_SIZE}x{GRID_SIZE} Sudoku puzzles...")
-    puzzles = []
+    all_puzzles = []
+    global_id = 0
 
-    for i in range(num_puzzles):
-        # Vary difficulty: 80-120 clues out of 256 cells
-        clues = 80 + (i * 40 // num_puzzles)
-        grid_seed = seed + i * 1000
-        puzzle_seed = seed + i * 1000 + 500
+    for tier in TIERS:
+        gs = tier["grid_size"]
+        bh = tier["box_h"]
+        bw = tier["box_w"]
+        np_ = tier["num_puzzles"]
+        label = tier["label"]
+        min_c = tier["min_clues"]
+        max_c = tier["max_clues"]
 
-        full_grid = _generate_full_grid(grid_seed)
-        puzzle = _create_puzzle(full_grid, clues, puzzle_seed)
+        print(f"Generating {np_} {label} puzzles...")
 
-        puzzles.append({
-            "id": i,
-            "clues": clues,
-            "puzzle": puzzle,
-            "solution": full_grid,
-        })
+        for i in range(np_):
+            clues = min_c + (i * (max_c - min_c) // np_)
+            grid_seed = seed + global_id * 1000
+            puzzle_seed = seed + global_id * 1000 + 500
 
-        if (i + 1) % 10 == 0:
-            print(f"  Generated {i + 1}/{num_puzzles} puzzles")
+            full_grid = _generate_full_grid(gs, bh, bw, grid_seed)
+            puzzle = _create_puzzle(full_grid, gs, clues, puzzle_seed)
 
-    data = {"config": _current_config(), "puzzles": puzzles}
+            all_puzzles.append({
+                "id": global_id,
+                "label": f"{label}_{i:03d}",
+                "grid_size": gs,
+                "box_h": bh,
+                "box_w": bw,
+                "clues": clues,
+                "puzzle": puzzle,
+                "solution": full_grid,
+            })
+            global_id += 1
+
+            if (i + 1) % 25 == 0:
+                print(f"  Generated {i + 1}/{np_} {label} puzzles")
+
+    data = {"config": _current_config(), "puzzles": all_puzzles}
     with open(PUZZLES_FILE, "w") as f:
         json.dump(data, f)
 
-    print(f"Puzzles: saved {num_puzzles} puzzles to {PUZZLES_FILE}")
-    return puzzles
+    print(f"Saved {len(all_puzzles)} total puzzles to {PUZZLES_FILE}")
+    return all_puzzles
 
 
 def load_puzzles():
     """Load puzzles from disk."""
+    if not os.path.exists(PUZZLES_FILE):
+        print("No puzzles found, generating...")
+        return generate_puzzles()
     with open(PUZZLES_FILE, "r") as f:
         data = json.load(f)
-    saved_config = data.get("config", {})
-    if saved_config != _current_config():
+    if data.get("config") != _current_config():
         print("Config changed since last generation, regenerating...")
         return generate_puzzles()
     return data["puzzles"]
 
 # ---------------------------------------------------------------------------
-# Evaluation (DO NOT CHANGE — this is the fixed metric)
+# Validation
 # ---------------------------------------------------------------------------
 
-def validate_solution(puzzle, solution, expected_solution):
-    """
-    Validate a proposed solution against the puzzle and expected solution.
-    Returns (is_correct, error_message).
-    """
+def validate_solution(puzzle, solution, grid_size, box_h, box_w):
+    """Validate a proposed solution. Returns (is_correct, error_message)."""
     if solution is None:
         return False, "No solution returned"
 
-    if len(solution) != GRID_SIZE:
+    if len(solution) != grid_size:
         return False, f"Wrong number of rows: {len(solution)}"
-    for r in range(GRID_SIZE):
-        if len(solution[r]) != GRID_SIZE:
+    for r in range(grid_size):
+        if len(solution[r]) != grid_size:
             return False, f"Wrong number of columns in row {r}: {len(solution[r])}"
 
-    # Check that all original clues are preserved
-    for r in range(GRID_SIZE):
-        for c in range(GRID_SIZE):
+    for r in range(grid_size):
+        for c in range(grid_size):
             if puzzle[r][c] != 0 and solution[r][c] != puzzle[r][c]:
-                return False, f"Clue at ({r},{c}) was changed: {puzzle[r][c]} -> {solution[r][c]}"
+                return False, f"Clue at ({r},{c}) changed: {puzzle[r][c]} -> {solution[r][c]}"
 
-    # Check all values are in [1, GRID_SIZE]
-    for r in range(GRID_SIZE):
-        for c in range(GRID_SIZE):
-            if not (1 <= solution[r][c] <= GRID_SIZE):
+    for r in range(grid_size):
+        for c in range(grid_size):
+            if not (1 <= solution[r][c] <= grid_size):
                 return False, f"Invalid value at ({r},{c}): {solution[r][c]}"
 
-    # Check rows
-    for r in range(GRID_SIZE):
-        if len(set(solution[r])) != GRID_SIZE:
+    for r in range(grid_size):
+        if len(set(solution[r])) != grid_size:
             return False, f"Duplicate in row {r}"
 
-    # Check columns
-    for c in range(GRID_SIZE):
-        col = [solution[r][c] for r in range(GRID_SIZE)]
-        if len(set(col)) != GRID_SIZE:
+    for c in range(grid_size):
+        col = [solution[r][c] for r in range(grid_size)]
+        if len(set(col)) != grid_size:
             return False, f"Duplicate in column {c}"
 
-    # Check boxes
-    for box_r in range(0, GRID_SIZE, BOX_H):
-        for box_c in range(0, GRID_SIZE, BOX_W):
+    for br in range(0, grid_size, box_h):
+        for bc in range(0, grid_size, box_w):
             box = []
-            for r in range(box_r, box_r + BOX_H):
-                for c in range(box_c, box_c + BOX_W):
+            for r in range(br, br + box_h):
+                for c in range(bc, bc + box_w):
                     box.append(solution[r][c])
-            if len(set(box)) != GRID_SIZE:
-                return False, f"Duplicate in box starting at ({box_r},{box_c})"
+            if len(set(box)) != grid_size:
+                return False, f"Duplicate in box at ({br},{bc})"
 
     return True, "OK"
 
@@ -222,36 +252,26 @@ class SolverTimeout(Exception):
     """Raised by check_deadline() when the time budget is exhausted."""
     pass
 
-_deadline = float("inf")  # absolute time.time() deadline
+_deadline = float("inf")
 
 def check_deadline():
-    """
-    Call this periodically inside your solver. Raises SolverTimeout if
-    the time budget has been exceeded. Cheap to call (just a clock read).
-    """
+    """Call periodically inside solver. Raises SolverTimeout if time budget exceeded."""
     if time.time() >= _deadline:
         raise SolverTimeout("time budget exceeded")
 
 
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+
 def evaluate_solver(solve_fn, puzzles, time_budget=TIME_BUDGET):
     """
-    Evaluate a solver function on the puzzle set within the time budget.
-    Puzzles are solved sequentially. Before each puzzle, a global deadline
-    is set so the solver can call check_deadline() to cooperatively abort
-    when time runs out.
+    Evaluate a solver on the puzzle set within the time budget.
 
-    Args:
-        solve_fn: function(puzzle) -> solution_grid or None
-        puzzles: list of puzzle dicts from load_puzzles()
-        time_budget: max seconds for the entire evaluation
+    Puzzles are tested in order (9x9 first, then 16x16, then 25x25).
+    solve_fn signature: solve_fn(grid, grid_size, box_h, box_w) -> solved_grid or None
 
-    Returns dict with:
-        - puzzles_solved: number of correctly solved puzzles
-        - puzzles_attempted: number of puzzles attempted
-        - total_time: total wall clock time used
-        - avg_time_per_solved: average time per solved puzzle
-        - solve_rate: fraction of attempted puzzles solved correctly
-        - results: list of per-puzzle results
+    Returns dict with overall stats plus per-tier breakdowns.
     """
     global _deadline
     results = []
@@ -265,24 +285,30 @@ def evaluate_solver(solve_fn, puzzles, time_budget=TIME_BUDGET):
             break
 
         puzzle = p["puzzle"]
-        expected = p["solution"]
         puzzle_id = p["id"]
+        gs = p["grid_size"]
+        bh = p["box_h"]
+        bw = p["box_w"]
 
         t_puzzle_start = time.time()
         try:
-            solution = solve_fn(copy.deepcopy(puzzle))
+            solution = solve_fn(copy.deepcopy(puzzle), gs, bh, bw)
         except SolverTimeout:
             results.append({
                 "id": puzzle_id,
+                "label": p.get("label", str(puzzle_id)),
+                "grid_size": gs,
                 "solved": False,
                 "time": time.time() - t_puzzle_start,
                 "error": "timeout",
             })
             puzzles_attempted += 1
-            break  # no time left, stop entirely
+            break
         except Exception as e:
             results.append({
                 "id": puzzle_id,
+                "label": p.get("label", str(puzzle_id)),
+                "grid_size": gs,
                 "solved": False,
                 "time": time.time() - t_puzzle_start,
                 "error": str(e),
@@ -291,10 +317,12 @@ def evaluate_solver(solve_fn, puzzles, time_budget=TIME_BUDGET):
             continue
 
         puzzle_time = time.time() - t_puzzle_start
-        is_correct, msg = validate_solution(puzzle, solution, expected)
+        is_correct, msg = validate_solution(puzzle, solution, gs, bh, bw)
 
         results.append({
             "id": puzzle_id,
+            "label": p.get("label", str(puzzle_id)),
+            "grid_size": gs,
             "solved": is_correct,
             "time": puzzle_time,
             "error": None if is_correct else msg,
@@ -304,11 +332,27 @@ def evaluate_solver(solve_fn, puzzles, time_budget=TIME_BUDGET):
         if is_correct:
             puzzles_solved += 1
 
-    _deadline = float("inf")  # reset after evaluation
+    _deadline = float("inf")
     total_time = time.time() - t_start
     avg_time = total_time / puzzles_solved if puzzles_solved > 0 else float("inf")
-    # Sum of solve times for correctly solved puzzles only
     solve_time_sum = sum(r["time"] for r in results if r["solved"])
+
+    # Per-tier breakdown
+    tier_results = {}
+    for tier in TIERS:
+        gs = tier["grid_size"]
+        label = tier["label"]
+        tier_r = [r for r in results if r["grid_size"] == gs]
+        tier_solved = sum(1 for r in tier_r if r["solved"])
+        tier_attempted = len(tier_r)
+        tier_solve_time = sum(r["time"] for r in tier_r if r["solved"])
+        tier_results[label] = {
+            "puzzles_solved": tier_solved,
+            "puzzles_attempted": tier_attempted,
+            "total_puzzles": tier["num_puzzles"],
+            "solve_time_sum": tier_solve_time,
+            "avg_time_per_solved": tier_solve_time / tier_solved if tier_solved > 0 else float("inf"),
+        }
 
     result = {
         "puzzles_solved": puzzles_solved,
@@ -319,6 +363,7 @@ def evaluate_solver(solve_fn, puzzles, time_budget=TIME_BUDGET):
         "avg_time_per_solved": avg_time,
         "solve_rate": puzzles_solved / puzzles_attempted if puzzles_attempted > 0 else 0.0,
         "results": results,
+        "tier_results": tier_results,
     }
     result["score"] = compute_score(result, time_budget)
     return result
@@ -326,21 +371,15 @@ def evaluate_solver(solve_fn, puzzles, time_budget=TIME_BUDGET):
 
 def compute_score(result, time_budget=TIME_BUDGET):
     """
-    Unified score for optimization. Higher is better.
+    Unified score. Higher is better.
 
     score = puzzles_solved + speed_bonus
 
     The speed bonus is in [0, 1) and only matters as a tiebreaker:
         speed_bonus = 1 - (solve_time_sum / time_budget)
-    where solve_time_sum is the total time spent on correctly solved
-    puzzles only. Unsolved or incorrect puzzles do not contribute.
 
-    This means:
-    - Each correctly solved puzzle contributes exactly 1 point.
-    - When two solvers solve the same number of puzzles, the faster
-      one scores higher.
-    - A solver that solves N+1 puzzles always beats one that solves N,
-      regardless of speed.
+    Each solved puzzle = 1 point regardless of size.
+    Total possible = 300 (100 per tier).
     """
     solved = result["puzzles_solved"]
     if solved == 0:
@@ -355,13 +394,19 @@ def compute_score(result, time_budget=TIME_BUDGET):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate 16x16 Sudoku puzzles for autoresearch")
-    parser.add_argument("--num-puzzles", type=int, default=NUM_PUZZLES, help="Number of puzzles to generate")
+    parser = argparse.ArgumentParser(description="Generate Sudoku puzzles for autoresearch")
     args = parser.parse_args()
 
     print(f"Data directory: {DATA_DIR}")
     print()
 
-    puzzles = generate_puzzles(num_puzzles=args.num_puzzles)
+    puzzles = generate_puzzles()
+
     print()
-    print(f"Done! Generated {len(puzzles)} puzzles. Ready to solve.")
+    for tier in TIERS:
+        label = tier["label"]
+        count = sum(1 for p in puzzles if p["grid_size"] == tier["grid_size"])
+        print(f"  {label}: {count} puzzles")
+    print(f"  Total: {len(puzzles)} puzzles")
+    print()
+    print("Done! Ready to solve.")

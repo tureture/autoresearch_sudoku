@@ -1,6 +1,7 @@
 """
 Autoresearch Sudoku solver.
 Bitmask constraint propagation + backtracking with MRV heuristic.
+Handles 9x9, 16x16, and 25x25 puzzles.
 
 Usage: uv run train.py
 """
@@ -8,72 +9,61 @@ Usage: uv run train.py
 import time
 import copy
 
-from prepare import TIME_BUDGET, GRID_SIZE, BOX_H, BOX_W, load_puzzles, evaluate_solver, check_deadline
+from prepare import TIME_BUDGET, load_puzzles, evaluate_solver, check_deadline
 
 # ---------------------------------------------------------------------------
-# Precompute peer indices and unit indices using flat arrays
+# Per-size precomputed data cache
 # ---------------------------------------------------------------------------
 
-_N = GRID_SIZE
-_ALL_BITS = (1 << _N) - 1  # 0xFFFF for 16 values: bits 0-15 represent values 1-16
+_cache = {}
 
-# Popcount table for 16-bit values
-_POPCOUNT = [0] * (1 << _N)
-for _i in range(1, 1 << _N):
-    _POPCOUNT[_i] = _POPCOUNT[_i >> 1] + (_i & 1)
+def _get_data(grid_size, box_h, box_w):
+    key = (grid_size, box_h, box_w)
+    if key in _cache:
+        return _cache[key]
 
-# Lowest set bit value (1-indexed): _LSB_VAL[mask] gives the value (1-16) of the lowest set bit
-_LSB_VAL = [0] * (1 << _N)
-for _i in range(1, 1 << _N):
-    _LSB_VAL[_i] = (_i & -_i).bit_length()
+    N = grid_size
+    ALL_BITS = (1 << N) - 1
 
-# Flat index: cell (r, c) -> r * N + c
-# Peers for each flat cell index
-_PEERS_FLAT = [None] * (_N * _N)
-for _r in range(_N):
-    for _c in range(_N):
-        peers = set()
-        for i in range(_N):
-            if i != _c:
-                peers.add(_r * _N + i)
-            if i != _r:
-                peers.add(i * _N + _c)
-        br, bc = (_r // BOX_H) * BOX_H, (_c // BOX_W) * BOX_W
-        for i in range(br, br + BOX_H):
-            for j in range(bc, bc + BOX_W):
-                if (i, j) != (_r, _c):
-                    peers.add(i * _N + j)
-        _PEERS_FLAT[_r * _N + _c] = tuple(peers)
+    # Peers for each flat cell index
+    peers = [None] * (N * N)
+    for r in range(N):
+        for c in range(N):
+            p = set()
+            for i in range(N):
+                if i != c:
+                    p.add(r * N + i)
+                if i != r:
+                    p.add(i * N + c)
+            br, bc = (r // box_h) * box_h, (c // box_w) * box_w
+            for i in range(br, br + box_h):
+                for j in range(bc, bc + box_w):
+                    if (i, j) != (r, c):
+                        p.add(i * N + j)
+            peers[r * N + c] = tuple(p)
 
-# Units: all rows, columns, and boxes as tuples of flat indices
-_ALL_UNITS = []
-for _r in range(_N):
-    _ALL_UNITS.append(tuple(_r * _N + _c for _c in range(_N)))
-for _c in range(_N):
-    _ALL_UNITS.append(tuple(_r * _N + _c for _r in range(_N)))
-for _br in range(0, _N, BOX_H):
-    for _bc in range(0, _N, BOX_W):
-        _ALL_UNITS.append(tuple((_br + i) * _N + (_bc + j)
-                                for i in range(BOX_H) for j in range(BOX_W)))
+    # Units: all rows, columns, and boxes
+    units = []
+    for r in range(N):
+        units.append(tuple(r * N + c for c in range(N)))
+    for c in range(N):
+        units.append(tuple(r * N + c for r in range(N)))
+    for br in range(0, N, box_h):
+        for bc in range(0, N, box_w):
+            units.append(tuple((br + i) * N + (bc + j)
+                               for i in range(box_h) for j in range(box_w)))
 
-# For each cell, the 3 units it belongs to
-_CELL_UNITS = [[] for _ in range(_N * _N)]
-for _ui, _unit in enumerate(_ALL_UNITS):
-    for _idx in _unit:
-        _CELL_UNITS[_idx].append(_ui)
+    data = (N, ALL_BITS, peers, units)
+    _cache[key] = data
+    return data
 
 # ---------------------------------------------------------------------------
 # Solver
 # ---------------------------------------------------------------------------
 
-def solve(grid):
-    N = _N
+def solve(grid, grid_size, box_h, box_w):
+    N, ALL_BITS, PEERS, UNITS = _get_data(grid_size, box_h, box_w)
     total = N * N
-    PEERS = _PEERS_FLAT
-    UNITS = _ALL_UNITS
-    POPCOUNT = _POPCOUNT
-    LSB_VAL = _LSB_VAL
-    ALL_BITS = _ALL_BITS
 
     # Flat arrays for grid values and candidate bitmasks
     vals = [0] * total
@@ -95,14 +85,13 @@ def solve(grid):
             bit = 1 << (vals[idx] - 1)
             for p in PEERS[idx]:
                 cands[p] &= ~bit
-    
+
     # Check for contradictions
     for idx in range(total):
         if vals[idx] == 0 and cands[idx] == 0:
             return None
 
     def assign(idx, val, vals, cands):
-        """Assign val to cell idx, propagate. Returns False on contradiction."""
         bit = 1 << (val - 1)
         vals[idx] = val
         cands[idx] = 0
@@ -114,15 +103,14 @@ def solve(grid):
         return True
 
     def propagate(vals, cands):
-        """Iterative constraint propagation. Returns False on contradiction."""
         changed = True
         while changed:
             changed = False
             # Naked singles
             for idx in range(total):
                 c = cands[idx]
-                if c != 0 and POPCOUNT[c] == 1:
-                    val = LSB_VAL[c]
+                if c != 0 and c.bit_count() == 1:
+                    val = (c & -c).bit_length()
                     if not assign(idx, val, vals, cands):
                         return False
                     changed = True
@@ -153,24 +141,21 @@ def solve(grid):
                                 return False
                             changed = True
 
-            # Naked pairs: if two cells in a unit have exact same 2 candidates,
-            # eliminate those candidates from all other cells in the unit
+            # Naked pairs
             for unit in UNITS:
                 for i in range(len(unit)):
                     ci = cands[unit[i]]
-                    if POPCOUNT[ci] != 2:
-                        continue
-                    for j in range(i + 1, len(unit)):
-                        if cands[unit[j]] == ci:
-                            # Found naked pair — eliminate from rest of unit
-                            for k in range(len(unit)):
-                                if k != i and k != j and cands[unit[k]] & ci:
-                                    cands[unit[k]] &= ~ci
-                                    if vals[unit[k]] == 0 and cands[unit[k]] == 0:
-                                        return False
-                                    if POPCOUNT[cands[unit[k]]] == 1:
-                                        changed = True
-                            break
+                    if ci != 0 and ci.bit_count() == 2:
+                        for j in range(i + 1, len(unit)):
+                            if cands[unit[j]] == ci:
+                                for k in range(len(unit)):
+                                    if k != i and k != j and cands[unit[k]] & ci:
+                                        cands[unit[k]] &= ~ci
+                                        if vals[unit[k]] == 0 and cands[unit[k]] == 0:
+                                            return False
+                                        if cands[unit[k]].bit_count() == 1:
+                                            changed = True
+                                break
         return True
 
     def backtrack(vals, cands):
@@ -185,7 +170,7 @@ def solve(grid):
         for idx in range(total):
             c = cands[idx]
             if c != 0:
-                pc = POPCOUNT[c]
+                pc = c.bit_count()
                 if pc < best_count:
                     best_count = pc
                     best = idx
@@ -242,8 +227,16 @@ if __name__ == "__main__":
     print()
     for r in results["results"]:
         status = "SOLVED" if r["solved"] else "FAILED"
-        print(f"  Puzzle {r['id']:3d}: {status} ({r['time']:.3f}s)" +
+        print(f"  Puzzle {r['label']:>12s}: {status} ({r['time']:.3f}s)" +
               (f" - {r['error']}" if r.get('error') else ""))
+
+    # Per-tier summary
+    print()
+    print("--- Per-tier results ---")
+    for tier_label, tr in results["tier_results"].items():
+        print(f"  {tier_label:>5s}: {tr['puzzles_solved']:3d}/{tr['total_puzzles']} solved"
+              f" ({tr['puzzles_attempted']:3d} attempted,"
+              f" avg {tr['avg_time_per_solved']:.3f}s)")
 
     # Final summary
     t_end = time.time()
