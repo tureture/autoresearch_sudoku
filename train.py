@@ -8,11 +8,15 @@ Usage: uv run train.py
 
 import time
 import copy
+import random
 
 from prepare import TIME_BUDGET, load_puzzles, evaluate_solver, check_deadline
 
 # Per-puzzle timeout exception (caught inside solve, not by harness)
 class _PuzzleTimeout(Exception):
+    pass
+
+class _AttemptTimeout(Exception):
     pass
 
 # ---------------------------------------------------------------------------
@@ -93,38 +97,41 @@ def solve(grid, grid_size, box_h, box_w):
     BL_PAIRS = _get_box_line_data(grid_size, box_h, box_w)
     total = N * N
 
-    # Per-puzzle timeout: 12s for 25x25, generous for smaller
+    # Per-puzzle timeout
     if grid_size >= 25:
         puzzle_deadline = time.time() + 12.0
+        attempt_budget = 3.0  # each attempt gets 3s, retry with different ordering
     elif grid_size >= 16:
         puzzle_deadline = time.time() + 30.0
+        attempt_budget = 30.0
     else:
-        puzzle_deadline = 0  # no per-puzzle limit for 9x9
+        puzzle_deadline = 0
+        attempt_budget = 0
 
-    # Flat arrays for grid values and candidate bitmasks
-    vals = [0] * total
-    cands = [0] * total
+    # Initial setup values (shared across attempts)
+    init_vals = [0] * total
+    init_cands = [0] * total
     for r in range(N):
         for c in range(N):
             idx = r * N + c
             v = grid[r][c]
             if v != 0:
-                vals[idx] = v
-                cands[idx] = 0
+                init_vals[idx] = v
+                init_cands[idx] = 0
             else:
-                vals[idx] = 0
-                cands[idx] = ALL_BITS
+                init_vals[idx] = 0
+                init_cands[idx] = ALL_BITS
 
     # Initial elimination from clues
     for idx in range(total):
-        if vals[idx] != 0:
-            bit = 1 << (vals[idx] - 1)
+        if init_vals[idx] != 0:
+            bit = 1 << (init_vals[idx] - 1)
             for p in PEERS[idx]:
-                cands[p] &= ~bit
+                init_cands[p] &= ~bit
 
     # Check for contradictions
     for idx in range(total):
-        if vals[idx] == 0 and cands[idx] == 0:
+        if init_vals[idx] == 0 and init_cands[idx] == 0:
             return None
 
     def assign(idx, val, vals, cands):
@@ -311,6 +318,8 @@ def solve(grid, grid_size, box_h, box_w):
         return True
 
     _bt_count = [0]
+    _attempt_deadline = [0]
+    _use_random = [False]
 
     def backtrack(vals, cands):
         _bt_count[0] += 1
@@ -318,6 +327,8 @@ def solve(grid, grid_size, box_h, box_w):
             check_deadline()
             if puzzle_deadline and time.time() > puzzle_deadline:
                 raise _PuzzleTimeout()
+            if _attempt_deadline[0] and time.time() > _attempt_deadline[0]:
+                raise _AttemptTimeout()
 
         if not propagate(vals, cands):
             return False
@@ -352,7 +363,10 @@ def solve(grid, grid_size, box_h, box_w):
                 if cands[p] & bit:
                     cnt += 1
             values.append((cnt, val))
-        values.sort()
+        if _use_random[0]:
+            random.shuffle(values)
+        else:
+            values.sort()
 
         for _, val in values:
 
@@ -369,15 +383,32 @@ def solve(grid, grid_size, box_h, box_w):
 
         return False
 
-    try:
-        if backtrack(vals, cands):
-            for r in range(N):
-                for c in range(N):
-                    grid[r][c] = vals[r * N + c]
-            return grid
-    except _PuzzleTimeout:
-        pass
-    return None
+    # Retry loop with randomized restarts
+    attempt = 0
+    while True:
+        vals = list(init_vals)
+        cands = list(init_cands)
+        _bt_count[0] = 0
+        _use_random[0] = attempt > 0
+        if attempt_budget:
+            _attempt_deadline[0] = time.time() + attempt_budget
+        else:
+            _attempt_deadline[0] = 0
+
+        try:
+            if backtrack(vals, cands):
+                for r in range(N):
+                    for c in range(N):
+                        grid[r][c] = vals[r * N + c]
+                return grid
+        except _AttemptTimeout:
+            attempt += 1
+            if puzzle_deadline and time.time() > puzzle_deadline:
+                return None
+            continue
+        except _PuzzleTimeout:
+            return None
+        return None
 
 # ---------------------------------------------------------------------------
 # Main: run solver on puzzle set and report results
