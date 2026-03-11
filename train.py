@@ -338,12 +338,23 @@ def solve(grid, grid_size, box_h, box_w):
         if best == -1:
             return True  # all cells filled
 
-        # Try each candidate value
+        # Try each candidate value, ordered by LCV (least constraining first)
         c = cands[best]
+        values = []
         while c:
             bit = c & (-c)
             val = bit.bit_length()
             c &= c - 1
+            # Count peers that would lose this candidate
+            cnt = 0
+            peers_best = PEERS[best]
+            for p in peers_best:
+                if cands[p] & bit:
+                    cnt += 1
+            values.append((cnt, val))
+        values.sort()
+
+        for _, val in values:
 
             # Save state
             old_vals = vals[:]
