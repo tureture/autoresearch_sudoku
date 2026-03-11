@@ -127,87 +127,86 @@ def solve(grid, grid_size, box_h, box_w):
         return True
 
     def propagate(vals, cands):
-        changed = True
-        while changed:
-            changed = False
-            # Naked singles
-            for idx in range(total):
-                c = cands[idx]
-                if c != 0 and c.bit_count() == 1:
-                    val = (c & -c).bit_length()
-                    if not assign(idx, val, vals, cands):
-                        return False
-                    changed = True
-
-            # Hidden singles
-            for unit in UNITS:
-                for v in range(N):
-                    bit = 1 << v
-                    place = -1
-                    count = 0
-                    for idx in unit:
-                        if cands[idx] & bit:
-                            count += 1
-                            place = idx
-                            if count > 1:
-                                break
-                    if count == 0:
-                        found = False
-                        for idx in unit:
-                            if vals[idx] == v + 1:
-                                found = True
-                                break
-                        if not found:
+        while True:
+            # FAST PHASE: naked singles + hidden singles + naked pairs
+            changed = True
+            while changed:
+                changed = False
+                # Naked singles
+                for idx in range(total):
+                    c = cands[idx]
+                    if c != 0 and c.bit_count() == 1:
+                        val = (c & -c).bit_length()
+                        if not assign(idx, val, vals, cands):
                             return False
-                    elif count == 1:
-                        if vals[place] == 0:
-                            if not assign(place, v + 1, vals, cands):
-                                return False
-                            changed = True
+                        changed = True
 
-            # Naked pairs
-            for unit in UNITS:
-                for i in range(len(unit)):
-                    ci = cands[unit[i]]
-                    if ci != 0 and ci.bit_count() == 2:
-                        for j in range(i + 1, len(unit)):
-                            if cands[unit[j]] == ci:
-                                for k in range(len(unit)):
-                                    if k != i and k != j and cands[unit[k]] & ci:
-                                        cands[unit[k]] &= ~ci
-                                        if vals[unit[k]] == 0 and cands[unit[k]] == 0:
-                                            return False
-                                        if cands[unit[k]].bit_count() == 1:
-                                            changed = True
-                                break
+                # Hidden singles
+                for unit in UNITS:
+                    for v in range(N):
+                        bit = 1 << v
+                        place = -1
+                        count = 0
+                        for idx in unit:
+                            if cands[idx] & bit:
+                                count += 1
+                                place = idx
+                                if count > 1:
+                                    break
+                        if count == 0:
+                            found = False
+                            for idx in unit:
+                                if vals[idx] == v + 1:
+                                    found = True
+                                    break
+                            if not found:
+                                return False
+                        elif count == 1:
+                            if vals[place] == 0:
+                                if not assign(place, v + 1, vals, cands):
+                                    return False
+                                changed = True
+
+                # Naked pairs
+                for unit in UNITS:
+                    for i in range(len(unit)):
+                        ci = cands[unit[i]]
+                        if ci != 0 and ci.bit_count() == 2:
+                            for j in range(i + 1, len(unit)):
+                                if cands[unit[j]] == ci:
+                                    for k in range(len(unit)):
+                                        if k != i and k != j and cands[unit[k]] & ci:
+                                            cands[unit[k]] &= ~ci
+                                            if vals[unit[k]] == 0 and cands[unit[k]] == 0:
+                                                return False
+                                            if cands[unit[k]].bit_count() == 1:
+                                                changed = True
+                                    break
+
+            # SLOW PHASE: hidden pairs + box-line reduction (only when fast phase exhausted)
+            slow_changed = False
 
             # Hidden pairs
             for unit in UNITS:
                 ulen = len(unit)
                 for vi in range(N):
                     bi = 1 << vi
-                    # Collect cells where vi is a candidate
-                    locs_i = 0  # bitmask of positions in unit
+                    locs_i = 0
                     cnt_i = 0
                     for k in range(ulen):
                         if cands[unit[k]] & bi:
                             locs_i |= 1 << k
                             cnt_i += 1
-                    if cnt_i < 2 or cnt_i > 3:
+                    if cnt_i != 2:
                         continue
                     for vj in range(vi + 1, N):
                         bj = 1 << vj
                         locs_j = 0
-                        cnt_j = 0
                         for k in range(ulen):
                             if cands[unit[k]] & bj:
                                 locs_j |= 1 << k
-                                cnt_j += 1
                         if locs_j != locs_i:
                             continue
-                        if cnt_i != 2:
-                            continue
-                        # Hidden pair: vi and vj only in these 2 cells
                         pair_bits = bi | bj
                         loc = locs_i
                         while loc:
@@ -218,13 +217,12 @@ def solve(grid, grid_size, box_h, box_w):
                                 cands[unit[k]] &= pair_bits
                                 if cands[unit[k]] == 0:
                                     return False
-                                changed = True
+                                slow_changed = True
 
             # Box-line reduction (pointing pairs / claiming)
             for inter, box_other, line_other in BL_PAIRS:
                 for v in range(N):
                     bit = 1 << v
-                    # Check if value is confined to intersection within box
                     in_inter = False
                     for idx in inter:
                         if cands[idx] & bit:
@@ -238,15 +236,13 @@ def solve(grid, grid_size, box_h, box_w):
                             in_box_other = True
                             break
                     if not in_box_other:
-                        # Pointing: eliminate from rest of line
                         for idx in line_other:
                             if cands[idx] & bit:
                                 cands[idx] &= ~bit
                                 if vals[idx] == 0 and cands[idx] == 0:
                                     return False
-                                changed = True
+                                slow_changed = True
                     else:
-                        # Check claiming: value confined to intersection within line
                         in_line_other = False
                         for idx in line_other:
                             if cands[idx] & bit:
@@ -258,7 +254,10 @@ def solve(grid, grid_size, box_h, box_w):
                                     cands[idx] &= ~bit
                                     if vals[idx] == 0 and cands[idx] == 0:
                                         return False
-                                    changed = True
+                                    slow_changed = True
+
+            if not slow_changed:
+                break
         return True
 
     def backtrack(vals, cands):
