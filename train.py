@@ -8,11 +8,15 @@ Usage: uv run train.py
 
 import time
 import copy
+import random
 
 from prepare import TIME_BUDGET, load_puzzles, evaluate_solver, check_deadline
 
 # Per-puzzle timeout exception (caught inside solve, not by harness)
 class _PuzzleTimeout(Exception):
+    pass
+
+class _AttemptTimeout(Exception):
     pass
 
 # ---------------------------------------------------------------------------
@@ -98,33 +102,35 @@ def solve(grid, grid_size, box_h, box_w):
         puzzle_deadline = time.time() + 5.0
     elif grid_size >= 16:
         puzzle_deadline = time.time() + 30.0
+        attempt_budget = 30.0
     else:
-        puzzle_deadline = 0  # no per-puzzle limit for 9x9
+        puzzle_deadline = 0
+        attempt_budget = 0
 
-    # Flat arrays for grid values and candidate bitmasks
-    vals = [0] * total
-    cands = [0] * total
+    # Initial setup values (shared across attempts)
+    init_vals = [0] * total
+    init_cands = [0] * total
     for r in range(N):
         for c in range(N):
             idx = r * N + c
             v = grid[r][c]
             if v != 0:
-                vals[idx] = v
-                cands[idx] = 0
+                init_vals[idx] = v
+                init_cands[idx] = 0
             else:
-                vals[idx] = 0
-                cands[idx] = ALL_BITS
+                init_vals[idx] = 0
+                init_cands[idx] = ALL_BITS
 
     # Initial elimination from clues
     for idx in range(total):
-        if vals[idx] != 0:
-            bit = 1 << (vals[idx] - 1)
+        if init_vals[idx] != 0:
+            bit = 1 << (init_vals[idx] - 1)
             for p in PEERS[idx]:
-                cands[p] &= ~bit
+                init_cands[p] &= ~bit
 
     # Check for contradictions
     for idx in range(total):
-        if vals[idx] == 0 and cands[idx] == 0:
+        if init_vals[idx] == 0 and init_cands[idx] == 0:
             return None
 
     def assign(idx, val, vals, cands):
@@ -155,8 +161,14 @@ def solve(grid, grid_size, box_h, box_w):
 
                 # Hidden singles
                 for unit in UNITS:
-                    for v in range(N):
-                        bit = 1 << v
+                    placed = 0
+                    for idx in unit:
+                        if vals[idx]:
+                            placed |= 1 << (vals[idx] - 1)
+                    need = ALL_BITS & ~placed
+                    while need:
+                        bit = need & (-need)
+                        need &= need - 1
                         place = -1
                         count = 0
                         for idx in unit:
@@ -166,27 +178,24 @@ def solve(grid, grid_size, box_h, box_w):
                                 if count > 1:
                                     break
                         if count == 0:
-                            found = False
-                            for idx in unit:
-                                if vals[idx] == v + 1:
-                                    found = True
-                                    break
-                            if not found:
+                            return False
+                        elif count == 1 and vals[place] == 0:
+                            if not assign(place, bit.bit_length(), vals, cands):
                                 return False
-                        elif count == 1:
-                            if vals[place] == 0:
-                                if not assign(place, v + 1, vals, cands):
-                                    return False
-                                changed = True
+                            changed = True
 
-                # Naked pairs
+                # Naked pairs + naked triples
                 for unit in UNITS:
-                    for i in range(len(unit)):
+                    ulen = len(unit)
+                    for i in range(ulen):
                         ci = cands[unit[i]]
-                        if ci != 0 and ci.bit_count() == 2:
-                            for j in range(i + 1, len(unit)):
+                        if ci == 0:
+                            continue
+                        bc = ci.bit_count()
+                        if bc == 2:
+                            for j in range(i + 1, ulen):
                                 if cands[unit[j]] == ci:
-                                    for k in range(len(unit)):
+                                    for k in range(ulen):
                                         if k != i and k != j and cands[unit[k]] & ci:
                                             cands[unit[k]] &= ~ci
                                             if vals[unit[k]] == 0 and cands[unit[k]] == 0:
@@ -194,6 +203,28 @@ def solve(grid, grid_size, box_h, box_w):
                                             if cands[unit[k]].bit_count() == 1:
                                                 changed = True
                                     break
+                        if bc == 2 or bc == 3:
+                            for j in range(i + 1, ulen):
+                                cj = cands[unit[j]]
+                                if cj == 0:
+                                    continue
+                                combo = ci | cj
+                                if combo.bit_count() > 3:
+                                    continue
+                                for m in range(j + 1, ulen):
+                                    cm = cands[unit[m]]
+                                    if cm == 0:
+                                        continue
+                                    triple = combo | cm
+                                    if triple.bit_count() != 3:
+                                        continue
+                                    for k in range(ulen):
+                                        if k != i and k != j and k != m and cands[unit[k]] & triple:
+                                            cands[unit[k]] &= ~triple
+                                            if vals[unit[k]] == 0 and cands[unit[k]] == 0:
+                                                return False
+                                            if cands[unit[k]].bit_count() == 1:
+                                                changed = True
 
             # SLOW PHASE: hidden pairs + box-line reduction (only when fast phase exhausted)
             slow_changed = False
@@ -201,8 +232,21 @@ def solve(grid, grid_size, box_h, box_w):
             # Hidden pairs
             for unit in UNITS:
                 ulen = len(unit)
-                for vi in range(N):
-                    bi = 1 << vi
+                placed = 0
+                for k in range(ulen):
+                    if vals[unit[k]]:
+                        placed |= 1 << (vals[unit[k]] - 1)
+                need = ALL_BITS & ~placed
+                # Iterate over unplaced values
+                need_list = []
+                tmp = need
+                while tmp:
+                    b = tmp & (-tmp)
+                    need_list.append(b)
+                    tmp &= tmp - 1
+                nl = len(need_list)
+                for ai in range(nl):
+                    bi = need_list[ai]
                     locs_i = 0
                     cnt_i = 0
                     for k in range(ulen):
@@ -211,8 +255,8 @@ def solve(grid, grid_size, box_h, box_w):
                             cnt_i += 1
                     if cnt_i != 2:
                         continue
-                    for vj in range(vi + 1, N):
-                        bj = 1 << vj
+                    for aj in range(ai + 1, nl):
+                        bj = need_list[aj]
                         locs_j = 0
                         for k in range(ulen):
                             if cands[unit[k]] & bj:
@@ -233,15 +277,16 @@ def solve(grid, grid_size, box_h, box_w):
 
             # Box-line reduction (pointing pairs / claiming)
             for inter, box_other, line_other in BL_PAIRS:
-                for v in range(N):
-                    bit = 1 << v
-                    in_inter = False
-                    for idx in inter:
-                        if cands[idx] & bit:
-                            in_inter = True
-                            break
-                    if not in_inter:
-                        continue
+                # Compute candidate mask for intersection cells
+                inter_cands = 0
+                for idx in inter:
+                    inter_cands |= cands[idx]
+                if not inter_cands:
+                    continue
+                need = inter_cands
+                while need:
+                    bit = need & (-need)
+                    need &= need - 1
                     in_box_other = False
                     for idx in box_other:
                         if cands[idx] & bit:
@@ -272,10 +317,18 @@ def solve(grid, grid_size, box_h, box_w):
                 break
         return True
 
+    _bt_count = [0]
+    _attempt_deadline = [0]
+    _use_random = [False]
+
     def backtrack(vals, cands):
-        check_deadline()
-        if puzzle_deadline and time.time() > puzzle_deadline:
-            raise _PuzzleTimeout()
+        _bt_count[0] += 1
+        if _bt_count[0] & 0xFF == 0:
+            check_deadline()
+            if puzzle_deadline and time.time() > puzzle_deadline:
+                raise _PuzzleTimeout()
+            if _attempt_deadline[0] and time.time() > _attempt_deadline[0]:
+                raise _AttemptTimeout()
 
         if not propagate(vals, cands):
             return False
@@ -296,12 +349,26 @@ def solve(grid, grid_size, box_h, box_w):
         if best == -1:
             return True  # all cells filled
 
-        # Try each candidate value
+        # Try each candidate value, ordered by LCV (least constraining first)
         c = cands[best]
+        values = []
         while c:
             bit = c & (-c)
             val = bit.bit_length()
             c &= c - 1
+            # Count peers that would lose this candidate
+            cnt = 0
+            peers_best = PEERS[best]
+            for p in peers_best:
+                if cands[p] & bit:
+                    cnt += 1
+            values.append((cnt, val))
+        if _use_random[0]:
+            random.shuffle(values)
+        else:
+            values.sort()
+
+        for _, val in values:
 
             # Save state
             old_vals = vals[:]
@@ -316,15 +383,32 @@ def solve(grid, grid_size, box_h, box_w):
 
         return False
 
-    try:
-        if backtrack(vals, cands):
-            for r in range(N):
-                for c in range(N):
-                    grid[r][c] = vals[r * N + c]
-            return grid
-    except _PuzzleTimeout:
-        pass
-    return None
+    # Retry loop with randomized restarts
+    attempt = 0
+    while True:
+        vals = list(init_vals)
+        cands = list(init_cands)
+        _bt_count[0] = 0
+        _use_random[0] = attempt > 0
+        if attempt_budget:
+            _attempt_deadline[0] = time.time() + attempt_budget
+        else:
+            _attempt_deadline[0] = 0
+
+        try:
+            if backtrack(vals, cands):
+                for r in range(N):
+                    for c in range(N):
+                        grid[r][c] = vals[r * N + c]
+                return grid
+        except _AttemptTimeout:
+            attempt += 1
+            if puzzle_deadline and time.time() > puzzle_deadline:
+                return None
+            continue
+        except _PuzzleTimeout:
+            return None
+        return None
 
 # ---------------------------------------------------------------------------
 # Main: run solver on puzzle set and report results
