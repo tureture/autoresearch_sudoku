@@ -135,14 +135,23 @@ def solve(grid, grid_size, box_h, box_w):
             return None
 
     def assign(idx, val, vals, cands):
-        bit = 1 << (val - 1)
-        vals[idx] = val
-        cands[idx] = 0
-        for p in PEERS[idx]:
-            if cands[p] & bit:
-                cands[p] &= ~bit
-                if vals[p] == 0 and cands[p] == 0:
-                    return False
+        queue = [(idx, val)]
+        while queue:
+            idx, val = queue.pop()
+            if vals[idx] != 0:
+                return vals[idx] == val
+            bit = 1 << (val - 1)
+            vals[idx] = val
+            cands[idx] = 0
+            for p in PEERS[idx]:
+                if cands[p] & bit:
+                    cands[p] &= ~bit
+                    if cands[p] == 0:
+                        if vals[p] == 0:
+                            return False
+                    elif cands[p].bit_count() == 1:
+                        nv = (cands[p] & -cands[p]).bit_length()
+                        queue.append((p, nv))
         return True
 
     def propagate(vals, cands):
@@ -179,7 +188,15 @@ def solve(grid, grid_size, box_h, box_w):
                                 if count > 1:
                                     break
                         if count == 0:
-                            return False
+                            # Value may have been placed by chain propagation
+                            val_v = bit.bit_length()
+                            already = False
+                            for idx in unit:
+                                if vals[idx] == val_v:
+                                    already = True
+                                    break
+                            if not already:
+                                return False
                         elif count == 1 and vals[place] == 0:
                             if not assign(place, bit.bit_length(), vals, cands):
                                 return False
