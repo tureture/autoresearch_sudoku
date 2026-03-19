@@ -318,6 +318,10 @@ def solve(grid, grid_size, box_h, box_w):
                 break
         return True
 
+    # Pre-propagate init state (avoid repeating for each restart attempt)
+    if not propagate(init_vals, init_cands):
+        return None
+
     _bt_count = [0]
     _attempt_deadline = [0]
     _use_random = [False]
