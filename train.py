@@ -160,7 +160,8 @@ def solve(grid, grid_size, box_h, box_w):
             changed = True
             while changed:
                 changed = False
-                # Naked singles
+
+                # Naked singles (chain-assign resolves cascades)
                 for idx in range(total):
                     c = cands[idx]
                     if c != 0 and c.bit_count() == 1:
@@ -219,6 +220,9 @@ def solve(grid, grid_size, box_h, box_w):
                                             if vals[unit[k]] == 0 and cands[unit[k]] == 0:
                                                 return False
                                             if cands[unit[k]].bit_count() == 1:
+                                                nv = (cands[unit[k]] & -cands[unit[k]]).bit_length()
+                                                if not assign(unit[k], nv, vals, cands):
+                                                    return False
                                                 changed = True
                                     break
                         if bc == 2 or bc == 3:
@@ -242,6 +246,9 @@ def solve(grid, grid_size, box_h, box_w):
                                             if vals[unit[k]] == 0 and cands[unit[k]] == 0:
                                                 return False
                                             if cands[unit[k]].bit_count() == 1:
+                                                nv = (cands[unit[k]] & -cands[unit[k]]).bit_length()
+                                                if not assign(unit[k], nv, vals, cands):
+                                                    return False
                                                 changed = True
 
             # SLOW PHASE: hidden pairs + box-line reduction (only when fast phase exhausted)
