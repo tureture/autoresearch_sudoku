@@ -19,8 +19,8 @@ AGENTS.md
 # Experimental code/artifacts
 dev/
 
-# Results file
-results.tsv
+# Results file (run.log is ephemeral, results.tsv is tracked)
+run.log
 
 # Generated puzzle data
 data/

@@ -1,0 +1,50 @@
+round	commit	puzzles_solved	avg_time	status	description
+mar11	0d8e0bc	202	1.485	keep	baseline: 9x9=100 16x16=100 25x25=2
+mar11	32be11d	104	0.000	discard	queue-driven propagation (regression - no naked pairs)
+mar11	7177346	101	2.970	discard	queue-driven + dirty units + naked pairs (regression - dirty tracking misses peer eliminations)
+mar11	142316e	212	1.415	keep	hidden pairs + box-line reduction (9x9=100 16x16=100 25x25=12)
+mar11	2cee8e8	212	1.415	keep	restructure: fast/slow propagation phases (same score, ~25% faster)
+mar11	2bdde27	236	1.271	keep	per-puzzle timeout 10s/25x25 30s/16x16 (9x9=100 16x16=100 25x25=36)
+mar11	944a91d	234	1.282	discard	5s timeout too aggressive, lost 7 slow solves, gained only 5 new
+mar11	c3b7169	240	1.250	keep	naked triples in fast phase (9x9=100 16x16=100 25x25=40)
+mar11	fb7ed05	238	1.261	discard	X-wing overhead too costly, slight regression
+mar11	a0c291c	252	1.190	keep	optimize hidden singles: skip placed values (9x9=100 16x16=100 25x25=52)
+mar11	9aba6cb	252	1.191	keep	optimize hidden pairs: skip placed values (faster, 71 attempted)
+mar11	e8325a0	253	1.188	keep	reduce time check: every 256 backtracks (9x9=100 16x16=100 25x25=53)
+mar11	f329e0b	273	1.104	keep	LCV heuristic for value ordering (9x9=100 16x16=100 25x25=73)
+mar11	7616cf1	272	1.103	discard	inline assign: larger function hurt cache, slight regression
+mar11	c2a0710	274	1.098	keep	12s timeout (9x9=100 16x16=100 25x25=74, 87 attempted)
+mar11	af90323	272	1.107	discard	degree heuristic tiebreaker: overhead hurt, -2 regression
+mar11	9dd8c6c	272	1.103	discard	bytearray for vals: slower indexing, -2 regression
+mar11	4da5afd	279	1.076	keep	randomized restarts for 25x25 (9x9=100 16x16=100 25x25=79)
+mar11	4ad2023	279	1.078	discard	15s/2s too long timeout, fewer attempted
+mar11	738a014	281	1.069	keep	12s/2s attempt budget (9x9=100 16x16=100 25x25=81)
+mar11	3aad088	276	1.090	discard	10s/2s too aggressive, -5 regression
+mar11	05c8863	272	1.115	discard	1024 check interval: timeouts overshoot, 303s total_time
+mar11	7ccd590	275	1.092	discard	adaptive 4s/2s: 4s first attempt too long, -6 regression
+mar11	8898b43	279	1.077	discard	skip LCV for restarts: LCV helps even with random, -2
+mar11	f07794e	277	1.085	discard	full MRV scan: scanning cost outweighs benefit, -4
+mar11	699ad26	277	1.086	discard	array.array: slower indexing, -4 regression
+mar11	a6bb84d	280	1.074	discard	trail-based backtracking: tuple append overhead ~= list copy, -1
+mar11	9bdb6ca	275	1.095	discard	hidden triples: O(n^3) too slow for 25x25, -6 regression
+mar11	bd01508	260	1.158	discard	chain-propagate naked singles in assign: stack order issues, -21
+mar11	73f6fc1	284	1.059	keep	optimize box-line skip placed values (9x9=100 16x16=100 25x25=84)
+mar11	8e4fde4	277	1.084	discard	pre-filter unfilled cells for naked pairs: tuple overhead, -7
+mar11	d74fb1b	280	1.073	discard	reverse-LCV attempt 1: wastes attempt budget, -4
+mar11	c0c598a	279	1.075	discard	random MRV tiebreaking: overhead + less focused search, -5
+mar11	9157bd9	287	1.048	keep	10s puzzle timeout for 25x25 (9x9=100 16x16=100 25x25=87/100 attempted)
+mar11	5d742ff	279	1.071	discard	8s timeout too aggressive, cuts short solvable puzzles, -8
+mar19	c46c085	277	1.085	keep	baseline from autoresearch/mar11 (9x9=100 16x16=100 25x25=77/96)
+mar19	cefb1f7	279	1.077	keep	pre-propagate init state before retry loop (25x25=79/96)
+mar19	26e877f	281	1.068	keep	chain-propagate naked singles in assign + fix hidden singles (25x25=81/98)
+mar19	5c03812	287	1.015	keep	direct assign in naked pairs/triples when creating naked singles (25x25=87/100)
+mar19	0b561b4	278	1.030	discard	direct assign in hidden pairs/box-line: 16x16 regressed to 97, -9
+mar19	be22063	280	1.072	discard	fix chain assign continue: queue overhead hurt, -7
+mar19	86c08e6	282	1.064	discard	12s timeout: only 94 attempted, -5
+mar19	5cc929e	280	1.073	discard	512 check interval: slight overshoot, -7
+mar19	8cdd263	272	1.103	discard	fast-only propagation in backtracking: slow phase crucial, -15
+mar19	2cd544c	279	1.077	discard	simple assign without chain: chain propagation crucial, -8
+mar19	5edb735	280	1.074	discard	first attempt full budget: hogs time, fewer attempted, -7
+mar19	e46664a	282	1.066	discard	skip naked triples for 25x25: triples important, -5
+mar19	651e682	284	1.060	discard	FLD probe for MRV > 2: state copy overhead too high, -3
+mar19	27477a2	282	1.067	discard	FLD probe for MRV >= 4: still too costly, -5
